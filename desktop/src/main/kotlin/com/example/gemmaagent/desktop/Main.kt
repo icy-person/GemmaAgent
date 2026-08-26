@@ -28,6 +28,7 @@ import com.example.gemmaagent.shared.JvmMemoryStore
 import com.example.gemmaagent.shared.ModelRunner
 import com.example.gemmaagent.shared.platformTools
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Engine
@@ -39,13 +40,26 @@ import java.io.File
 
 private class DesktopModelRunner(private val path: String) : ModelRunner, AutoCloseable {
     private val engine = Engine(EngineConfig(modelPath = path, backend = Backend.CPU()))
-    private lateinit var conversation: com.google.ai.edge.litertlm.Conversation
+    private var conversation: Conversation? = null
+
     suspend fun start() = withContext(Dispatchers.IO) {
         engine.initialize()
+        reset()
+    }
+
+    override suspend fun reset() = withContext(Dispatchers.IO) {
+        conversation?.close()
         conversation = engine.createConversation(ConversationConfig(systemInstruction = Contents.of("You are GemmaAgent.")))
     }
-    override suspend fun generate(prompt: String): String = conversation.sendMessage(prompt).text
-    override fun close() { runCatching { conversation.close() }; runCatching { engine.close() } }
+
+    override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
+        conversation?.sendMessage(prompt)?.text ?: error("Model is not started")
+    }
+
+    override fun close() {
+        runCatching { conversation?.close() }
+        runCatching { engine.close() }
+    }
 }
 
 fun main() = application {
@@ -79,7 +93,7 @@ fun main() = application {
                             }.onFailure { status = "Load failed: ${it.message}" }
                         }
                     }) { Text("Load") }
-                    OutlinedButton(onClick = { answer = "Memories: ${memory.count()}" }) { Text("Memory") }
+                    OutlinedButton(onClick = { scope.launch { answer = "Memories: ${memory.count()}" } }) { Text("Memory") }
                 }
                 TextField(task, { task = it }, Modifier.fillMaxWidth().padding(top = 8.dp), label = { Text("Task") })
                 Button(enabled = agent != null && task.isNotBlank(), onClick = {
