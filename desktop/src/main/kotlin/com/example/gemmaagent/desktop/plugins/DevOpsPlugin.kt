@@ -30,13 +30,7 @@ class DevOpsPlugin(private val workspace: File) : AgentPlugin {
 private val devJson = Json { ignoreUnknownKeys = true }
 
 private class GitWorkspaceTool(private val root: File) : AgentTool {
-    override val definition = ToolDefinition(
-        name = "git_workspace",
-        description = "Manage a local git workspace. Actions: status, clone, pull, branches, checkout, log, diff. Input: {action:string, repo?:string, destination?:string, branch?:string}",
-        category = "development",
-        permissions = setOf(Permission.READ, Permission.WRITE, Permission.NETWORK, Permission.EXECUTE),
-        dangerous = true,
-    )
+    override val definition = ToolDefinition("git_workspace", "Manage a local git workspace. Actions: status, clone, pull, branches, checkout, log, diff.", "development", setOf(Permission.READ, Permission.WRITE, Permission.NETWORK, Permission.EXECUTE), dangerous = true)
 
     override suspend fun execute(argumentsJson: String): ToolResult = runCatching {
         val o = devJson.parseToJsonElement(argumentsJson).jsonObject
@@ -83,59 +77,40 @@ private class GitWorkspaceTool(private val root: File) : AgentTool {
 }
 
 private class BuildTool(private val root: File) : AgentTool {
-    override val definition = ToolDefinition(
-        name = "build",
-        description = "Build/test/lint a project using a safe preset. Input: {action:'build'|'test'|'lint'|'clean'|'check', system?:'gradle'|'cargo'|'maven'|'npm'|'cmake'|'auto', target?:string, timeout_seconds?:number}",
-        category = "development",
-        permissions = setOf(Permission.EXECUTE, Permission.READ, Permission.WRITE),
-        dangerous = true,
-    )
+    override val definition = ToolDefinition("build", "Build/test/lint a project using a safe preset. Actions: build, test, lint, clean, check.", "development", setOf(Permission.EXECUTE, Permission.READ, Permission.WRITE), dangerous = true)
 
     override suspend fun execute(argumentsJson: String): ToolResult = runCatching {
         val o = devJson.parseToJsonElement(argumentsJson).jsonObject
         val action = o["action"]?.jsonPrimitive?.content ?: "build"
         val system = o["system"]?.jsonPrimitive?.content ?: detectSystem(root)
         val target = o["target"]?.jsonPrimitive?.content?.trim().orEmpty()
+        require(target.length <= 200 && !target.any { it in ";|&`$<>\n\r" }) { "Unsafe build target" }
         val timeout = o["timeout_seconds"]?.jsonPrimitive?.content?.toLongOrNull()?.coerceIn(10, 1800) ?: 600L
         val command = when (system) {
-            "gradle" -> when (action) {
-                "build" -> "./gradlew ${if (target.isBlank()) "build" else target}"
-                "test" -> "./gradlew ${if (target.isBlank()) "test" else target}"
-                "lint" -> "./gradlew ${if (target.isBlank()) "lint" else target}"
-                "clean" -> "./gradlew clean"
-                "check" -> "./gradlew check"
-                else -> error("Unsupported gradle action")
+            "gradle" -> {
+                val runner = if (File(root, "gradlew").isFile) "./gradlew" else "gradle"
+                when (action) {
+                    "build", "test", "lint" -> "$runner ${if (target.isBlank()) action else target}"
+                    "clean" -> "$runner clean"
+                    "check" -> "$runner check"
+                    else -> error("Unsupported gradle action")
+                }
             }
             "cargo" -> when (action) {
-                "build" -> "cargo build ${target}"
-                "test" -> "cargo test ${target}"
-                "check" -> "cargo check ${target}"
-                "clean" -> "cargo clean"
-                "lint" -> "cargo clippy ${target} --all-targets --all-features -- -D warnings"
-                else -> error("Unsupported cargo action")
+                "build" -> "cargo build ${target}"; "test" -> "cargo test ${target}"; "check" -> "cargo check ${target}"; "clean" -> "cargo clean"; "lint" -> "cargo clippy ${target} --all-targets --all-features -- -D warnings"; else -> error("Unsupported cargo action")
             }
             "maven" -> when (action) {
-                "build" -> "./mvnw package -DskipTests"
-                "test" -> "./mvnw test"
-                "clean" -> "./mvnw clean"
-                "check" -> "./mvnw verify"
-                else -> error("Unsupported maven action")
+                "build" -> "./mvnw package -DskipTests"; "test" -> "./mvnw test"; "clean" -> "./mvnw clean"; "check" -> "./mvnw verify"; else -> error("Unsupported maven action")
             }
             "npm" -> when (action) {
-                "build" -> "npm run build"
-                "test" -> "npm test"
-                "lint" -> "npm run lint"
-                else -> error("Unsupported npm action")
+                "build" -> "npm run build"; "test" -> "npm test"; "lint" -> "npm run lint"; else -> error("Unsupported npm action")
             }
             "cmake" -> when (action) {
-                "build" -> "cmake --build build --parallel"
-                "test" -> "ctest --test-dir build --output-on-failure"
-                "clean" -> "cmake --build build --target clean"
-                else -> error("Unsupported cmake action")
+                "build" -> "cmake --build build --parallel"; "test" -> "ctest --test-dir build --output-on-failure"; "clean" -> "cmake --build build --target clean"; else -> error("Unsupported cmake action")
             }
             else -> error("Unknown build system: $system")
         }
-        execute(command, timeout)
+        execute(command, timeout, system)
     }.getOrElse { ToolResult(false, "build error: ${it.message}") }
 
     private fun detectSystem(root: File): String = when {
@@ -147,23 +122,18 @@ private class BuildTool(private val root: File) : AgentTool {
         else -> error("Unable to detect build system")
     }
 
-    private fun execute(command: String, seconds: Long): ToolResult {
+    private fun execute(command: String, seconds: Long, system: String): ToolResult {
         val p = ProcessBuilder("sh", "-lc", command).directory(root).redirectErrorStream(true).start()
         val finished = p.waitFor(seconds, TimeUnit.SECONDS)
         if (!finished) p.destroyForcibly()
         val output = p.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText().take(120_000) }
         val code = if (p.isAlive) -1 else p.exitValue()
-        return ToolResult(finished && code == 0, "exit=$code\n$output", metadata = mapOf("system" to detectSystem(root), "command" to command, "exitCode" to code.toString()))
+        return ToolResult(finished && code == 0, "exit=$code\n$output", metadata = mapOf("system" to system, "command" to command, "exitCode" to code.toString()))
     }
 }
 
 private class GitHubTool : AgentTool {
-    override val definition = ToolDefinition(
-        name = "github",
-        description = "Read public GitHub repository metadata, files, issues and commit info. Input: {action:'repo'|'file'|'issue'|'commit', owner, repo, path?/number?/ref?}",
-        category = "github",
-        permissions = setOf(Permission.NETWORK, Permission.READ),
-    )
+    override val definition = ToolDefinition("github", "Read public GitHub repository metadata, files, issues and commit info.", "github", setOf(Permission.NETWORK, Permission.READ))
 
     override suspend fun execute(argumentsJson: String): ToolResult = runCatching {
         val o = devJson.parseToJsonElement(argumentsJson).jsonObject
