@@ -70,7 +70,7 @@ class RagEngine(
             val end = minOf(text.length, start + chunkChars)
             var actualEnd = end
             if (end < text.length) {
-                val boundary = text.lastIndexOfAny(charArrayOf('\n', '.', '!', '?', ' '), endIndex = end - 1)
+                val boundary = text.lastIndexOfAny(charArrayOf('\n', '.', '!', '?', ' '), startIndex = end - 1)
                 if (boundary > start + chunkChars / 2) actualEnd = boundary
             }
             val chunkText = text.substring(start, actualEnd).trim()
