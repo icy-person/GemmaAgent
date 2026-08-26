@@ -41,7 +41,7 @@ private class DocumentExtractTool(private val root: File) : AgentTool {
     }.getOrElse { ToolResult(false, "extract_document error: ${it.message}") }
 
     private fun runCli(exe: String, args: List<String>, seconds: Long): ToolResult {
-        val p = ProcessBuilder(exe, *args).redirectErrorStream(true).start()
+        val p = ProcessBuilder(exe, *args.toTypedArray()).redirectErrorStream(true).start()
         val finished = p.waitFor(seconds, TimeUnit.SECONDS)
         if (!finished) p.destroyForcibly()
         val output = p.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText().take(200_000) }
