@@ -11,7 +11,7 @@ private val json = Json { ignoreUnknownKeys = true }
 
 actual fun platformTools(workspace: String): List<AgentTool> {
     val root = File(workspace).apply { mkdirs() }
-    return listOf(JvmFileTool(root), JvmHttpTool(), JvmProcessTool(), JvmFindTool(root))
+    return listOf(JvmFileTool(root), JvmHttpTool(), JvmProcessTool(root), JvmFindTool(root))
 }
 
 private class JvmFileTool(private val root: File) : AgentTool {
@@ -26,7 +26,10 @@ private class JvmFileTool(private val root: File) : AgentTool {
             "append" -> { target.parentFile?.mkdirs(); target.appendText(o["content"]?.jsonPrimitive?.content.orEmpty(), StandardCharsets.UTF_8); ToolResult(true, "appended=${target.length()}") }
             "delete" -> { require(target != root) { "Cannot delete workspace root" }; ToolResult(target.deleteRecursively(), "deleted") }
             "exists" -> ToolResult(true, target.exists().toString())
-            "list" -> ToolResult(true, target.listFiles()?.sortedBy { it.name }.joinToString("\n") { if (it.isDirectory) "[DIR] ${it.name}" else "${it.name} (${it.length()} bytes)" } ?: "empty")
+            "list" -> {
+                val entries = target.listFiles()?.sortedBy { it.name } ?: emptyList()
+                ToolResult(true, entries.joinToString("\n") { if (it.isDirectory) "[DIR] ${it.name}" else "${it.name} (${it.length()} bytes)" }.ifBlank { "empty" })
+            }
             "mkdir" -> { require(target.mkdirs() || target.isDirectory) { "Cannot create directory" }; ToolResult(true, "created") }
             else -> ToolResult(false, "Unknown filesystem action: $action")
         }
