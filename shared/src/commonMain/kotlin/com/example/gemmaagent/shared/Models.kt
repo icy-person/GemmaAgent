@@ -89,12 +89,7 @@ sealed class AgentEvent {
     @Serializable data class Failed(val message: String) : AgentEvent()
 }
 
-data class AgentRun(
-    val answer: String,
-    val success: Boolean,
-    val iterations: Int,
-    val experienceId: String,
-)
+data class AgentRun(val answer: String, val success: Boolean, val iterations: Int, val experienceId: String)
 
 sealed interface ModelContent {
     data class Text(val text: String) : ModelContent
@@ -117,6 +112,7 @@ interface MemoryStore {
 interface ModelRunner {
     suspend fun generate(prompt: String): String
     suspend fun generate(contents: List<ModelContent>): String = error("Multimodal input is not supported by this model runner")
+    suspend fun reset() = Unit
 }
 
 interface AgentTool {
