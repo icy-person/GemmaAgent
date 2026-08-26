@@ -35,14 +35,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.example.gemmaagent.shared.AgentConfig
 import com.example.gemmaagent.shared.AgentEngine
 import com.example.gemmaagent.shared.AgentEvent
 import com.example.gemmaagent.shared.AgentMode
@@ -57,7 +55,6 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        AndroidAgentContext.context = applicationContext
         setContent { GemmaAgentApp() }
     }
 }
@@ -167,7 +164,7 @@ private fun GemmaAgentApp() {
                     onMode = { m ->
                         settings = settings.copy(mode = m)
                         settings.save(context)
-                        agent = runner?.let { r -> createAgent(r); agent }
+                        runner?.let { createAgent(it) }
                     },
                     onPrompt = { prompt = it },
                     onRun = {
