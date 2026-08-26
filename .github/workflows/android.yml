@@ -3,9 +3,6 @@ name: Build GemmaAgent Linux (Arch/CachyOS)
 on:
   workflow_dispatch:
 
-env:
-  JAVA_VERSION: '21'
-
 jobs:
   linux-arch:
     name: Arch Linux x86_64 distribution
@@ -21,35 +18,32 @@ jobs:
           pacman -S --noconfirm --needed \
             base-devel \
             jdk21-openjdk \
+            gradle \
             git \
             unzip \
             zip \
             which \
             curl \
-            wget \
-            fakeroot
+            wget
           java -version
+          gradle --version
 
-      - name: Build Linux desktop distribution
+      - name: Build portable Linux distribution
         run: |
-          chmod +x ./gradlew 2>/dev/null || true
-          gradle :desktop:clean :desktop:packageDistributionForCurrentOS --no-daemon
+          gradle :desktop:clean :desktop:createDistributable --no-daemon
+          test -d desktop/build/compose/binaries/main/app/GemmaAgent
+          mkdir -p dist
+          tar -C desktop/build/compose/binaries/main/app \
+            -czf dist/GemmaAgent-Arch-x86_64.tar.gz GemmaAgent
 
-      - name: Show distribution files
+      - name: Verify distribution
         run: |
-          find desktop/build/compose/binaries -maxdepth 8 -type f -print
-          test -n "$(find desktop/build/compose/binaries -type f -print -quit)"
-
-      - name: Create Arch-friendly bundle
-        run: |
-          mkdir -p dist/GemmaAgent
-          cp -a desktop/build/compose/binaries/. dist/GemmaAgent/
-          cp README.md dist/GemmaAgent/ 2>/dev/null || true
-          tar -C dist -czf GemmaAgent-Arch-x86_64.tar.gz GemmaAgent
+          test -s dist/GemmaAgent-Arch-x86_64.tar.gz
+          tar -tzf dist/GemmaAgent-Arch-x86_64.tar.gz | head -50
 
       - name: Upload Arch/CachyOS distribution
         uses: actions/upload-artifact@v4
         with:
           name: GemmaAgent-Arch-x86_64
-          path: GemmaAgent-Arch-x86_64.tar.gz
+          path: dist/GemmaAgent-Arch-x86_64.tar.gz
           if-no-files-found: error
