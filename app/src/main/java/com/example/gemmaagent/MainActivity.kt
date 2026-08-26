@@ -47,6 +47,9 @@ import com.example.gemmaagent.shared.AgentObserver
 import com.example.gemmaagent.shared.CalculatorTool
 import com.example.gemmaagent.shared.DateTimeTool
 import com.example.gemmaagent.shared.EchoTool
+import com.example.gemmaagent.shared.AndroidRagStore
+import com.example.gemmaagent.shared.RagAwareModelRunner
+import com.example.gemmaagent.shared.RagPlugin
 import com.example.gemmaagent.shared.platformTools
 import kotlinx.coroutines.launch
 import java.io.File
@@ -67,6 +70,7 @@ private fun GemmaAgentApp() {
     val scope = rememberCoroutineScope()
     val repo = remember { ModelRepository(context) }
     val memory = remember { AndroidMemoryStore(context) }
+    val ragStore = remember { AndroidRagStore(context) }
     var settings by remember { mutableStateOf(ModelSettings.load(context)) }
     var modelPath by remember { mutableStateOf(repo.lastImportedPath()) }
     var runner by remember { mutableStateOf<LiteRtModelRunner?>(null) }
@@ -78,6 +82,7 @@ private fun GemmaAgentApp() {
     var modeMenu by remember { mutableStateOf(false) }
     var events by remember { mutableStateOf(listOf<String>()) }
     var memoryCount by remember { mutableStateOf(0L) }
+    var ragCount by remember { mutableStateOf(0L) }
 
     val observer = remember {
         object : AgentObserver {
@@ -89,13 +94,15 @@ private fun GemmaAgentApp() {
 
     fun createAgent(r: LiteRtModelRunner) {
         val workspace = context.filesDir.resolve("agent-workspace").absolutePath
+        val ragModel = RagAwareModelRunner(r, ragStore, topK = settings.memoryTopK.coerceIn(1, 12), maxChars = 16_000)
         val tools = buildList {
             add(CalculatorTool())
             add(DateTimeTool())
             add(EchoTool())
             addAll(platformTools(workspace))
+            addAll(RagPlugin(ragStore).tools())
         }
-        agent = AgentEngine(r, memory, tools, settings.agentConfig(), observer = observer)
+        agent = AgentEngine(ragModel, memory, tools, settings.agentConfig(), observer = observer)
     }
 
     suspend fun loadModel() {
@@ -106,7 +113,9 @@ private fun GemmaAgentApp() {
         runner?.close()
         runner = r
         createAgent(r)
-        status = "Ready · ${File(path).name}"
+        memoryCount = memory.count()
+        ragCount = ragStore.countDocuments()
+        status = "Ready · ${File(path).name} · RAG=$ragCount"
     }
 
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -131,7 +140,10 @@ private fun GemmaAgentApp() {
         }
     }
 
-    LaunchedEffect(Unit) { memoryCount = memory.count() }
+    LaunchedEffect(Unit) {
+        memoryCount = memory.count()
+        ragCount = ragStore.countDocuments()
+    }
 
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -170,9 +182,9 @@ private fun GemmaAgentApp() {
                         val a = agent ?: return@ChatPanel
                         scope.launch {
                             status = "Agent running…"
-                            runCatching { a.run(prompt).also { answer = it.answer; memoryCount = memory.count() } }
+                            runCatching { a.run(prompt).also { answer = it.answer; memoryCount = memory.count(); ragCount = ragStore.countDocuments() } }
                                 .onFailure { answer = "Error: ${it.message}" }
-                            status = "Ready · memories=$memoryCount"
+                            status = "Ready · memories=$memoryCount · rag=$ragCount"
                         }
                     },
                     enabled = agent != null && prompt.isNotBlank(),
@@ -193,7 +205,7 @@ private fun GemmaAgentApp() {
                         runner?.close(); runner = null; agent = null; status = "Model unloaded"
                     },
                 )
-                Panel.MEMORY -> MemoryPanel(count = memoryCount, events = events)
+                Panel.MEMORY -> MemoryPanel(count = memoryCount, ragCount = ragCount, events = events)
                 Panel.TOOLS -> ToolsPanel()
                 Panel.LEARNING -> LearningPanel(events = events)
                 Panel.SETTINGS -> SettingsPanel(settings = settings, onSettings = { settings = it; it.save(context) }, status = status)
@@ -277,11 +289,12 @@ private fun ToggleRow(label: String, checked: Boolean, onChecked: (Boolean) -> U
 }
 
 @Composable
-private fun MemoryPanel(count: Long, events: List<String>) {
+private fun MemoryPanel(count: Long, ragCount: Long, events: List<String>) {
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Permanent memory", style = MaterialTheme.typography.headlineSmall)
         Text("Stored experiences: $count")
-        Text("Memory is persistent and independent from Gemma weights.")
+        Text("RAG documents: $ragCount")
+        Text("Memory and RAG are persistent and independent from Gemma weights.")
         Text("Recent learning events")
         LazyColumn(Modifier.weight(1f)) { items(events.takeLast(80)) { Text(it, style = MaterialTheme.typography.bodySmall) } }
     }
@@ -291,12 +304,16 @@ private fun MemoryPanel(count: Long, events: List<String>) {
 private fun ToolsPanel() {
     val tools = listOf(
         "filesystem" to "Read/write/list inside the agent workspace",
+        "find_files" to "Find files by name/content",
         "http" to "GET/POST network requests",
         "calculator" to "Arithmetic and expressions",
         "datetime" to "Local date and time",
         "device" to "Android runtime/device operations",
-        "clipboard" to "Copy text through Android clipboard adapter",
-        "intent" to "Open Android URIs/intents through platform adapter",
+        "clipboard" to "Read/write Android clipboard",
+        "intent" to "Open Android HTTP(S) intents",
+        "packages" to "Inspect installed Android packages",
+        "rag_ingest" to "Persist local documents into the RAG index",
+        "rag_search" to "Retrieve relevant local RAG evidence",
     )
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item { Text("Tools & permissions", style = MaterialTheme.typography.headlineSmall) }
