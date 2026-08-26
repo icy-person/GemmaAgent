@@ -24,7 +24,8 @@ class JvmRagStore(private val file: File) : RagStore {
     private suspend fun ensureLoaded() = mutex.withLock {
         if (loaded) return@withLock
         if (file.isFile) runCatching {
-            val state = json.decodeFromString<RagState>(file.readText(StandardCharsets.UTF_8))
+            val text = Files.readString(file.toPath(), StandardCharsets.UTF_8)
+            val state = json.decodeFromString(RagState.serializer(), text)
             state.documents.forEach { docs[it.id] = it }
         }
         loaded = true
@@ -32,17 +33,26 @@ class JvmRagStore(private val file: File) : RagStore {
 
     override suspend fun upsert(document: RagDocument) {
         ensureLoaded()
-        mutex.withLock { docs[document.id] = document; saveLocked() }
+        mutex.withLock {
+            docs[document.id] = document
+            saveLocked()
+        }
     }
 
     override suspend fun delete(documentId: String) {
         ensureLoaded()
-        mutex.withLock { docs.remove(documentId); saveLocked() }
+        mutex.withLock {
+            docs.remove(documentId)
+            saveLocked()
+        }
     }
 
     override suspend fun clear() {
         ensureLoaded()
-        mutex.withLock { docs.clear(); saveLocked() }
+        mutex.withLock {
+            docs.clear()
+            saveLocked()
+        }
     }
 
     override suspend fun countDocuments(): Long {
@@ -62,33 +72,52 @@ class JvmRagStore(private val file: File) : RagStore {
         return mutex.withLock {
             val chunks = docs.values.flatMap { engine.chunk(it) }
             if (chunks.isEmpty()) return@withLock emptyList()
+
             val documentFrequency = tokens.associateWith { token ->
                 chunks.count { ragTokens(it.text).contains(token) }.coerceAtLeast(1)
             }
+
             chunks.mapNotNull { chunk ->
                 val terms = ragTokens(chunk.text).toSet()
                 val matched = tokens.count { it in terms }
                 if (matched == 0) return@mapNotNull null
+
                 val tf = matched.toDouble() / tokens.size
                 val idf = tokens.sumOf { token ->
                     log((chunks.size + 1.0) / documentFrequency.getValue(token))
                 } / tokens.size
                 val titleBoost = if (tokens.any { chunk.title.lowercase().contains(it) }) 0.15 else 0.0
-                RagHit(chunk, (tf * 0.75 + idf * 0.12 + titleBoost).coerceIn(0.0, 1.0 + titleBoost))
-            }.sortedByDescending { it.score }.take(limit.coerceIn(1, 32))
+
+                RagHit(
+                    chunk,
+                    (tf * 0.75 + idf * 0.12 + titleBoost).coerceIn(0.0, 1.0 + titleBoost)
+                )
+            }
+                .sortedByDescending { it.score }
+                .take(limit.coerceIn(1, 32))
         }
     }
 
     private fun saveLocked() {
-        val target = file.toPath().toAbsolutePath().normalize()
-        val parent = target.parent ?: Path.of(".").toAbsolutePath().normalize()
+        val target: Path = file.toPath().toAbsolutePath().normalize()
+        val parent: Path = target.parent ?: Path.of(".").toAbsolutePath().normalize()
         Files.createDirectories(parent)
-        val temp = parent.resolve(target.fileName.toString() + ".part")
-        val payload = json.encodeToString(RagState(docs.values.toList()))
+
+        val tempName = target.fileName.toString() + ".part"
+        val temp: Path = parent.resolve(tempName)
+        val state = RagState(docs.values.toList())
+        val payload = json.encodeToString(RagState.serializer(), state)
+
         Files.writeString(temp, payload, StandardCharsets.UTF_8)
-        runCatching {
-            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        }.getOrElse {
+
+        try {
+            Files.move(
+                temp,
+                target,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE
+            )
+        } catch (_: Exception) {
             Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
         }
     }
