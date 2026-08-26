@@ -162,7 +162,13 @@ class WebResearchEngine(
 
     private fun canonicalize(url: String): String = runCatching {
         val uri = URI(url)
-        URI(uri.scheme.lowercase(), uri.host.lowercase(), uri.port, uri.path.ifBlank { "/" }, null, null).toString().removeSuffix("/")
+        buildString {
+            append(uri.scheme.lowercase())
+            append("://")
+            append(uri.host.lowercase())
+            if (uri.port != -1) append(':').append(uri.port)
+            append(uri.path.ifBlank { "/" })
+        }.removeSuffix("/")
     }.getOrDefault(url)
 
     private fun fingerprint(text: String): String = text.lowercase()
