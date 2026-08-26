@@ -10,18 +10,23 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
-/** A local web research pipeline: search -> fetch -> parse -> rank -> deduplicate -> crawl. */
+/** A local web research pipeline: search -> render -> parse -> rank -> deduplicate -> crawl. */
 class WebResearchEngine(
     private val searchLimit: Int = 12,
     private val maxPages: Int = 10,
     private val maxPageChars: Int = 30_000,
     private val maxChunksPerPage: Int = 8,
+    chromiumExecutable: String? = null,
 ) {
+    private val chromium = ChromiumRenderer(chromiumExecutable)
+
     data class Config(
         val maxResults: Int = 8,
         val crawlDepth: Int = 1,
         val minScore: Double = 0.05,
         val maxTotalChars: Int = 70_000,
+        val javascriptEnabled: Boolean = true,
+        val renderTimeoutSeconds: Long = 30,
     )
 
     data class SearchResult(val url: String, val title: String, val snippet: String)
@@ -32,12 +37,16 @@ class WebResearchEngine(
         val text: String,
         val chunks: List<Chunk>,
         val links: List<String>,
+        val renderedWithJavaScript: Boolean = false,
     )
     data class Report(
         val query: String,
         val sources: List<Source>,
         val focusedEvidence: List<String>,
+        val javascriptAvailable: Boolean,
     )
+
+    fun browserAvailable(): Boolean = chromium.isAvailable()
 
     suspend fun research(query: String, config: Config = Config()): Report {
         require(query.isNotBlank()) { "query is required" }
@@ -49,7 +58,7 @@ class WebResearchEngine(
         val evidence = bounded.flatMap { source ->
             source.chunks.map { "${source.title} (${source.url}): ${it.text}" }
         }.sortedByDescending { relevance(query, it) }.take(18)
-        return Report(query, bounded, evidence)
+        return Report(query, bounded, evidence, browserAvailable())
     }
 
     private fun boundSources(items: List<Source>, maxChars: Int): List<Source> {
@@ -59,11 +68,12 @@ class WebResearchEngine(
             if (used >= maxChars) break
             val remaining = maxChars - used
             val text = source.text.take(remaining)
-            val chunks = source.chunks.takeWhile { chunk ->
-                used + chunk.text.length <= maxChars
-            }
+            val chunks = source.chunks.takeWhile { chunk -> used + chunk.text.length <= maxChars }
             if (text.isBlank()) continue
-            result += source.copy(text = text, chunks = if (chunks.isEmpty()) listOf(Chunk(text.take(4000), 0.0)) else chunks)
+            result += source.copy(
+                text = text,
+                chunks = if (chunks.isEmpty()) listOf(Chunk(text.take(4000), 0.0)) else chunks,
+            )
             used += text.length
         }
         return result
@@ -83,7 +93,8 @@ class WebResearchEngine(
     }
 
     private fun fetchSource(query: String, url: String, fallbackTitle: String, config: Config): Source {
-        val response = httpGet(url)
+        val rendered = if (config.javascriptEnabled) runCatching { chromium.render(url) }.getOrNull() else null
+        val response = rendered?.html ?: httpGet(url)
         val doc = Jsoup.parse(response, url)
         val title = doc.title().trim().ifBlank { fallbackTitle }
         removeNoise(doc)
@@ -95,7 +106,14 @@ class WebResearchEngine(
         val text = selected.joinToString("\n\n") { it.first }.take(maxPageChars)
         val chunks = selected.map { (block, score) -> Chunk(block, score) }
         val links = extractRelevantLinks(doc, URI(url))
-        return Source(url, title, text, chunks, links)
+        return Source(
+            url = url,
+            title = title,
+            text = text,
+            chunks = chunks,
+            links = links,
+            renderedWithJavaScript = rendered != null,
+        )
     }
 
     private fun removeNoise(doc: Document) {
@@ -192,9 +210,7 @@ class WebResearchEngine(
         return try {
             val code = connection.responseCode
             require(code in 200..399) { "HTTP $code" }
-            connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader ->
-                reader.readText().take(2_000_000)
-            }
+            connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader -> reader.readText().take(2_000_000) }
         } finally {
             connection.disconnect()
         }
