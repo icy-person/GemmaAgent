@@ -3,7 +3,6 @@ use jni::sys::{jint, jlong, jstring};
 use jni::JNIEnv;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -56,9 +55,7 @@ impl MemoryEngine {
         Ok(id)
     }
 
-    fn count(&self) -> usize {
-        self.index.len()
-    }
+    fn count(&self) -> usize { self.index.len() }
 
     fn search(&self, query: &str, limit: usize) -> Vec<Experience> {
         let q = tokenize(query);
@@ -67,7 +64,7 @@ impl MemoryEngine {
             let tokens = tokenize(&text);
             let overlap = tokens.intersection(&q).count() as f64;
             let success = if e.success { 0.2 } else { 0.0 };
-            let score = overlap + e.score.max(0.0).min(1.0) * 0.5 + success;
+            let score = overlap + e.score.clamp(0.0, 1.0) * 0.5 + success;
             (score, e)
         }).collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -90,10 +87,7 @@ fn engines() -> &'static Mutex<HashMap<jlong, Box<MemoryEngine>>> {
 
 #[no_mangle]
 pub extern "system" fn Java_com_example_gemmaagent_rust_RustMemory_nativeCreate(mut env: JNIEnv, _class: JClass, path: JString) -> jlong {
-    let raw: String = match env.get_string(&path) {
-        Ok(v) => v.into(),
-        Err(_) => return 0,
-    };
+    let raw: String = match env.get_string(&path) { Ok(v) => v.into(), Err(_) => return 0 };
     let engine = Box::new(MemoryEngine::open(PathBuf::from(raw)));
     let ptr = Box::into_raw(engine) as jlong;
     match engines().lock() {
@@ -108,9 +102,7 @@ pub extern "system" fn Java_com_example_gemmaagent_rust_RustMemory_nativeCreate(
 #[no_mangle]
 pub extern "system" fn Java_com_example_gemmaagent_rust_RustMemory_nativeDestroy(_env: JNIEnv, _class: JClass, handle: jlong) {
     if handle == 0 { return; }
-    if let Ok(mut map) = engines().lock() {
-        map.remove(&handle);
-    }
+    if let Ok(mut map) = engines().lock() { map.remove(&handle); }
 }
 
 #[no_mangle]
@@ -118,7 +110,7 @@ pub extern "system" fn Java_com_example_gemmaagent_rust_RustMemory_nativeSearch(
     if handle == 0 { return env.new_string("[]").unwrap().into_raw(); }
     let q: String = match env.get_string(&query) { Ok(v) => v.into(), Err(_) => return env.new_string("[]").unwrap().into_raw() };
     let result = match engines().lock() {
-        Ok(map) => map.get(&handle).map(|e| e.search(&q, limit.max(1) as usize)).unwrap_or_default(),
+        Ok(map) => map.get(&handle).map(|engine| engine.search(&q, limit.max(1) as usize)).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
     env.new_string(serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string())).unwrap().into_raw()
@@ -128,9 +120,9 @@ pub extern "system" fn Java_com_example_gemmaagent_rust_RustMemory_nativeSearch(
 pub extern "system" fn Java_com_example_gemmaagent_rust_RustMemory_nativeStore(mut env: JNIEnv, _class: JClass, handle: jlong, experience_json: JString) -> jstring {
     if handle == 0 { return env.new_string("").unwrap().into_raw(); }
     let raw: String = match env.get_string(&experience_json) { Ok(v) => v.into(), Err(_) => return env.new_string("").unwrap().into_raw() };
-    let e: Experience = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => return env.new_string("").unwrap().into_raw() };
+    let experience: Experience = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => return env.new_string("").unwrap().into_raw() };
     let id = match engines().lock() {
-        Ok(mut map) => map.get_mut(&handle).and_then(|e| e.store(e).ok()).unwrap_or_default(),
+        Ok(mut map) => map.get_mut(&handle).and_then(|engine| engine.store(experience).ok()).unwrap_or_default(),
         Err(_) => String::new(),
     };
     env.new_string(id).unwrap().into_raw()
@@ -141,7 +133,7 @@ pub extern "system" fn Java_com_example_gemmaagent_rust_RustMemory_nativeCount(e
     if handle == 0 { return 0; }
     let _ = env.exception_check();
     match engines().lock() {
-        Ok(map) => map.get(&handle).map(|e| e.count() as jlong).unwrap_or(0),
+        Ok(map) => map.get(&handle).map(|engine| engine.count() as jlong).unwrap_or(0),
         Err(_) => 0,
     }
 }
