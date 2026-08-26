@@ -25,16 +25,30 @@ class ModelRepository(private val context: Context) {
 
     private fun copy(uri: Uri, sourceName: String): String {
         val safe = sourceName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        require(safe.endsWith(".litertlm", ignoreCase = true)) { "Selected file is not a .litertlm model" }
         val target = File(modelDir, safe)
-        context.contentResolver.openInputStream(uri).use { input ->
-            requireNotNull(input) { "Cannot open model" }
-            target.outputStream().use { output -> input.copyTo(output, 1024 * 1024) }
+        val temp = File(modelDir, ".$safe.part-${System.currentTimeMillis()}")
+        try {
+            context.contentResolver.openInputStream(uri).use { input ->
+                requireNotNull(input) { "Cannot open model" }
+                temp.outputStream().use { output -> input.copyTo(output, 1024 * 1024) }
+            }
+            require(temp.isFile && temp.length() > 0L) { "Imported model is empty" }
+            if (target.exists() && !target.delete()) error("Cannot replace existing model: ${target.name}")
+            check(temp.renameTo(target)) { "Cannot finalize imported model" }
+            metadata.writeText(
+                JSONObject()
+                    .put("name", target.name)
+                    .put("path", target.absolutePath)
+                    .put("runtime", "LiteRT-LM")
+                    .put("importedAt", System.currentTimeMillis())
+                    .toString(2)
+            )
+            return target.absolutePath
+        } catch (t: Throwable) {
+            runCatching { temp.delete() }
+            throw t
         }
-        metadata.writeText(
-            JSONObject().put("name", target.name).put("path", target.absolutePath)
-                .put("runtime", "LiteRT-LM").put("importedAt", System.currentTimeMillis()).toString(2)
-        )
-        return target.absolutePath
     }
 
     private fun findModel(dir: DocumentFile): DocumentFile? {
@@ -47,6 +61,8 @@ class ModelRepository(private val context: Context) {
 
     fun lastImportedPath(): String? = runCatching {
         if (!metadata.isFile) return null
-        JSONObject(metadata.readText()).optString("path").takeIf { it.isNotBlank() }?.takeIf { File(it).isFile }
+        JSONObject(metadata.readText()).optString("path")
+            .takeIf { it.isNotBlank() }
+            ?.takeIf { File(it).isFile && File(it).length() > 0L }
     }.getOrNull()
 }
