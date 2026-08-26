@@ -26,19 +26,17 @@ jobs:
             wget
           java -version
 
-      - name: Install official Gradle 9.7
+      - name: Install official Gradle 9.7.1
         run: |
           mkdir -p /opt/gradle
-          wget -q https://services.gradle.org/distributions/gradle-9.7-bin.zip -O /tmp/gradle.zip
+          curl -fsSL https://services.gradle.org/distributions/gradle-9.7.1-bin.zip -o /tmp/gradle.zip
           unzip -q /tmp/gradle.zip -d /opt/gradle
-          ln -sfn /opt/gradle/gradle-9.7 /opt/gradle/current
-          export PATH="/opt/gradle/current/bin:$PATH"
-          gradle --version
+          ln -sfn /opt/gradle/gradle-9.7.1 /opt/gradle/current
+          /opt/gradle/current/bin/gradle --version
 
       - name: Build portable Linux distribution
         run: |
-          export PATH="/opt/gradle/current/bin:$PATH"
-          gradle :desktop:clean :desktop:createDistributable --no-daemon
+          /opt/gradle/current/bin/gradle :desktop:clean :desktop:createDistributable --no-daemon
           test -d desktop/build/compose/binaries/main/app/GemmaAgent
           mkdir -p dist
           tar -C desktop/build/compose/binaries/main/app \
