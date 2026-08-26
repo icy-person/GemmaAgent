@@ -1,6 +1,6 @@
 package com.example.gemmaagent
 
-import com.example.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
