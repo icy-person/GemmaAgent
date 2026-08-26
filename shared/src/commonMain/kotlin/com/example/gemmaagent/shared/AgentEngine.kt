@@ -26,6 +26,7 @@ class AgentEngine(
     suspend fun run(task: String, project: String? = null): AgentRun = mutex.withLock {
         val started = nowEpochMs()
         observer.onEvent(AgentEvent.Started(task, started))
+        runCatching { model.reset() }
 
         val memories = memory.search(task, config.memoryTopK)
         val facts = memory.searchFacts(task, 8)
