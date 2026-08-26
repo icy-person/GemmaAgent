@@ -1,30 +1,30 @@
 package com.example.gemmaagent.shared
 
-import kotlinx.atomicfu.atomic
-
 class AgentMetrics : AgentObserver {
-    private val thinking = atomic(0)
-    private val toolCalls = atomic(0)
-    private val toolFailures = atomic(0)
-    private val completed = atomic(0)
-    private val failed = atomic(0)
+    private var thinking = 0L
+    private var toolCalls = 0L
+    private var toolFailures = 0L
+    private var completed = 0L
+    private var failed = 0L
 
+    @Synchronized
     override fun onEvent(event: AgentEvent) {
         when (event) {
-            is AgentEvent.Thinking -> thinking.incrementAndGet()
-            is AgentEvent.ToolRequested -> toolCalls.incrementAndGet()
-            is AgentEvent.ToolCompleted -> if (!event.result.ok) toolFailures.incrementAndGet()
-            is AgentEvent.Finished -> completed.incrementAndGet()
-            is AgentEvent.Failed -> failed.incrementAndGet()
+            is AgentEvent.Thinking -> thinking++
+            is AgentEvent.ToolRequested -> toolCalls++
+            is AgentEvent.ToolCompleted -> if (!event.result.ok) toolFailures++
+            is AgentEvent.Finished -> completed++
+            is AgentEvent.Failed -> failed++
             is AgentEvent.Started, is AgentEvent.Reflection -> Unit
         }
     }
 
+    @Synchronized
     fun snapshot(): Map<String, Long> = mapOf(
-        "thinking" to thinking.value,
-        "toolCalls" to toolCalls.value,
-        "toolFailures" to toolFailures.value,
-        "completed" to completed.value,
-        "failed" to failed.value,
+        "thinking" to thinking,
+        "toolCalls" to toolCalls,
+        "toolFailures" to toolFailures,
+        "completed" to completed,
+        "failed" to failed,
     )
 }
