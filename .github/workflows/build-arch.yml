@@ -18,12 +18,23 @@ jobs:
           mkdir -p /opt/gradle
           curl -fsSL https://services.gradle.org/distributions/gradle-9.7.1-bin.zip -o /tmp/gradle.zip
           unzip -q /tmp/gradle.zip -d /opt/gradle
-          /opt/gradle/gradle-9.7.1/bin/gradle :shared:jvmTest :desktop:createDistributable --no-daemon --stacktrace
+      - name: Run shared and desktop tests
+        run: |
+          /opt/gradle/gradle-9.7.1/bin/gradle :shared:jvmTest :desktop:test --no-daemon --stacktrace
+      - name: Build portable Desktop distribution
+        run: |
+          /opt/gradle/gradle-9.7.1/bin/gradle :desktop:clean :desktop:createDistributable --no-daemon --stacktrace
           test -d desktop/build/compose/binaries/main/app/GemmaAgent
+      - name: Verify Chromium capability
+        run: |
+          chromium --version
+          chromium --headless --disable-gpu --no-sandbox --dump-dom https://example.com > /tmp/chromium-dom.html
+          test -s /tmp/chromium-dom.html
       - name: Package
         run: |
           mkdir -p dist
           tar -C desktop/build/compose/binaries/main/app -czf dist/GemmaAgent-Arch-x86_64.tar.gz GemmaAgent
+          test -s dist/GemmaAgent-Arch-x86_64.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: GemmaAgent-Arch-x86_64
