@@ -4,6 +4,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.net.HttpURLConnection
 import java.net.URI
+import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -44,13 +45,18 @@ class WebResearchEngine(
         val sources: List<Source>,
         val focusedEvidence: List<String>,
         val javascriptAvailable: Boolean,
+        val searchProvider: String = "duckduckgo",
     )
 
     fun browserAvailable(): Boolean = chromium.isAvailable()
 
     suspend fun research(query: String, config: Config = Config()): Report {
         require(query.isNotBlank()) { "query is required" }
-        val firstResults = search(query).take(config.maxResults)
+        val search = search(query)
+        val firstResults = search.results.take(config.maxResults)
+        if (firstResults.isEmpty()) {
+            throw IllegalStateException("Web search returned no usable results. Provider=${search.provider}; ${search.error ?: "no parser results"}")
+        }
         val firstSources = fetchSources(query, firstResults, config)
         val discovered = if (config.crawlDepth > 0) discoverAndFetch(query, firstSources, config) else emptyList()
         val all = deduplicateSources(firstSources + discovered).take(maxPages)
@@ -58,8 +64,14 @@ class WebResearchEngine(
         val evidence = bounded.flatMap { source ->
             source.chunks.map { "${source.title} (${source.url}): ${it.text}" }
         }.sortedByDescending { relevance(query, it) }.take(18)
-        return Report(query, bounded, evidence, browserAvailable())
+        return Report(query, bounded, evidence, browserAvailable(), search.provider)
     }
+
+    private data class SearchResponse(
+        val results: List<SearchResult>,
+        val provider: String,
+        val error: String? = null,
+    )
 
     private fun boundSources(items: List<Source>, maxChars: Int): List<Source> {
         var used = 0
@@ -182,16 +194,57 @@ class WebResearchEngine(
         return (density * 0.85 + lengthBoost * 0.15).coerceIn(0.0, 1.0)
     }
 
-    private fun search(query: String): List<SearchResult> {
+    private fun search(query: String): SearchResponse {
         val encoded = java.net.URLEncoder.encode(query, StandardCharsets.UTF_8)
-        val html = httpGet("https://html.duckduckgo.com/html/?q=$encoded")
+        val endpoints = listOf(
+            "https://html.duckduckgo.com/html/?q=$encoded" to "duckduckgo-html",
+            "https://lite.duckduckgo.com/lite/?q=$encoded" to "duckduckgo-lite",
+        )
+        val errors = mutableListOf<String>()
+        for ((endpoint, provider) in endpoints) {
+            runCatching {
+                val html = httpGet(endpoint)
+                val results = parseSearchResults(html)
+                if (results.isNotEmpty()) return SearchResponse(results, provider)
+                errors += "$provider returned no parseable results"
+            }.onFailure { errors += "$provider: ${it.message}" }
+        }
+        return SearchResponse(emptyList(), "duckduckgo-fallbacks", errors.joinToString("; "))
+    }
+
+    private fun parseSearchResults(html: String): List<SearchResult> {
         val doc = Jsoup.parse(html)
-        return doc.select("a.result__a").mapNotNull { anchor ->
-            val url = anchor.absUrl("href")
-            runCatching { URI(url); require(url.startsWith("http")) }.getOrNull() ?: return@mapNotNull null
-            val snippet = anchor.parent()?.parent()?.selectFirst(".result__snippet")?.text().orEmpty()
-            SearchResult(url, anchor.text().trim(), snippet)
-        }.distinctBy { canonicalize(it.url) }.take(searchLimit)
+        val selectors = listOf(
+            "a.result__a",
+            ".result-link",
+            "a.result__url",
+            "a[href]",
+        )
+        for (selector in selectors) {
+            val parsed = doc.select(selector).mapNotNull { anchor ->
+                val rawHref = anchor.attr("href").trim()
+                val url = resolveSearchUrl(rawHref) ?: anchor.absUrl("href").trim().takeIf { it.startsWith("http") }
+                if (url.isNullOrBlank()) return@mapNotNull null
+                val title = anchor.text().trim().ifBlank { return@mapNotNull null }
+                val snippet = anchor.parent()?.parent()?.selectFirst(".result__snippet, .result-snippet")?.text().orEmpty()
+                SearchResult(url, title, snippet)
+            }.distinctBy { canonicalize(it.url) }.take(searchLimit)
+            if (parsed.isNotEmpty()) return parsed
+        }
+        return emptyList()
+    }
+
+    private fun resolveSearchUrl(rawHref: String): String? {
+        if (rawHref.isBlank()) return null
+        if (rawHref.startsWith("//")) return "https:$rawHref"
+        if (rawHref.startsWith("http://") || rawHref.startsWith("https://")) return rawHref
+        val candidate = runCatching { URI(rawHref) }.getOrNull() ?: return null
+        val query = candidate.rawQuery.orEmpty()
+        val uddg = query.split('&').firstNotNullOfOrNull { part ->
+            val pieces = part.split('=', limit = 2)
+            if (pieces.size == 2 && pieces[0].equals("uddg", ignoreCase = true)) pieces[1] else null
+        }
+        return uddg?.let { runCatching { URLDecoder.decode(it, StandardCharsets.UTF_8) }.getOrNull() }
     }
 
     private fun httpGet(url: String): String {
@@ -202,9 +255,10 @@ class WebResearchEngine(
             connectTimeout = 15_000
             readTimeout = 25_000
             instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "GemmaAgent/1.0 (+local research engine)")
-            setRequestProperty("Accept", "text/html,application/xhtml+xml,text/plain;q=0.8")
+            setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/151 Safari/537.36 GemmaAgent/1.0")
+            setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             setRequestProperty("Accept-Language", "en-US,en;q=0.8")
+            setRequestProperty("Cache-Control", "no-cache")
         }
         return try {
             val code = connection.responseCode
