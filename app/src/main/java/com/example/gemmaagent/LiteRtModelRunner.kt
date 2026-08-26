@@ -1,6 +1,8 @@
 package com.example.gemmaagent
 
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
@@ -8,6 +10,7 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.tool
+import com.example.gemmaagent.shared.ModelContent
 import com.example.gemmaagent.shared.ModelRunner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -44,6 +47,20 @@ class LiteRtModelRunner(
     override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
         val c = conversation ?: error("Model is not started")
         c.sendMessage(prompt).text
+    }
+
+    override suspend fun generate(contents: List<ModelContent>): String = withContext(Dispatchers.Default) {
+        val c = conversation ?: error("Model is not started")
+        val mapped = contents.map {
+            when (it) {
+                is ModelContent.Text -> Content.Text(it.text)
+                is ModelContent.ImageFile -> Content.ImageFile(it.absolutePath)
+                is ModelContent.AudioFile -> Content.AudioFile(it.absolutePath)
+                is ModelContent.ImageBytes -> Content.ImageBytes(it.bytes)
+                is ModelContent.AudioBytes -> Content.AudioBytes(it.bytes)
+            }
+        }
+        c.sendMessage(Contents.of(mapped)).text
     }
 
     override fun close() {
