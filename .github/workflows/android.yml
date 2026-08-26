@@ -47,13 +47,19 @@ jobs:
         run: |
           if [ "$BUILD_TYPE" = "release" ]; then
             gradle :app:assembleRelease --no-daemon
+            APK_DIR="app/build/outputs/apk/release"
           else
             gradle :app:assembleDebug --no-daemon
+            APK_DIR="app/build/outputs/apk/debug"
           fi
+          test -d "$APK_DIR"
+          find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' -print
+          test -n "$(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' -print -quit)"
       - uses: actions/upload-artifact@v4
         with:
           name: GemmaAgent-${{ inputs.build_type }}-apk
           path: app/build/outputs/apk/${{ inputs.build_type }}/*.apk
+          if-no-files-found: error
 
   desktop:
     if: ${{ inputs.build_desktop }}
@@ -66,8 +72,14 @@ jobs:
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
       - name: Build desktop distribution
-        run: gradle :desktop:packageDistributionForCurrentOS --no-daemon
+        run: |
+          gradle :desktop:clean :desktop:packageDistributionForCurrentOS --no-daemon
+          echo "Desktop outputs:"
+          find desktop/build/compose/binaries -type f -maxdepth 8 -print 2>/dev/null || true
+          test -d desktop/build/compose/binaries
+          test -n "$(find desktop/build/compose/binaries -type f -print -quit)"
       - uses: actions/upload-artifact@v4
         with:
           name: GemmaAgent-desktop
-          path: desktop/build/compose/binaries/**
+          path: desktop/build/compose/binaries
+          if-no-files-found: error
