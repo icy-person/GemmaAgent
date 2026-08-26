@@ -12,7 +12,6 @@ suspend fun installDefaultPlugins(registry: PluginRegistry, dataDir: File) {
     registry.install(RagPlugin(JvmRagStore(File(dataDir, "rag/index.json"))))
     registry.install(FileIntelligencePlugin(workspace))
     registry.install(DevOpsPlugin(workspace))
-    registry.install(AdvancedPlugins(workspace, dataDir))
     registry.install(RuntimeSupportPlugin(dataDir))
     registry.install(DocumentAndDataPlugin(workspace))
 }
