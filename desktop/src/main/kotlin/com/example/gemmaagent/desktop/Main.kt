@@ -72,17 +72,35 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
         check(state != ModelState.READY) { "Model is already loaded" }
         state = ModelState.LOADING
         try {
-            require(File(path).isFile) { "Model file does not exist: $path" }
+            val modelFile = File(path)
+            require(modelFile.isFile) { "Model file does not exist: $path" }
+            require(modelFile.canRead()) { "Model file is not readable: $path" }
+            require(modelFile.length() > 0L) { "Model file is empty: $path" }
             require(path.endsWith(".litertlm", ignoreCase = true)) { "Expected a .litertlm model" }
-            val newEngine = Engine(EngineConfig(modelPath = path, backend = Backend.CPU()))
+
+            // Conservative CPU configuration for Gemma 4 E4B on desktop.
+            // 8K avoids the large default context allocation while remaining useful for an agent.
+            // Disable the XNNPACK weight cache while validating runtime stability; this also
+            // prevents stale .xnnpack_cache files from a different LiteRT-LM version from being reused.
+            val config = EngineConfig(
+                modelPath = modelFile.absolutePath,
+                backend = Backend.CPU(threadCount = 2),
+                visionBackend = null,
+                audioBackend = null,
+                maxNumTokens = 8192,
+                maxNumImages = 0,
+                cacheDir = ":nocache",
+            )
+            val newEngine = Engine(config)
             newEngine.initialize()
             engine = newEngine
             reset()
             state = ModelState.READY
         } catch (t: Throwable) {
+            runCatching { conversation?.close() }
             runCatching { engine?.close() }
-            engine = null
             conversation = null
+            engine = null
             state = ModelState.FAILED
             throw t
         }
@@ -92,11 +110,16 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
         val activeEngine = engine ?: error("Model is not initialized")
         conversation?.close()
         conversation = activeEngine.createConversation(
-            ConversationConfig(systemInstruction = Contents.of("You are GemmaAgent, a local autonomous agent. Use available tools, verify tool results, and do not invent evidence."))
+            ConversationConfig(
+                systemInstruction = Contents.of(
+                    "You are GemmaAgent, a local autonomous agent. Use available tools, verify tool results, and do not invent evidence."
+                )
+            )
         )
     }
 
     override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
+        require(prompt.isNotBlank()) { "Prompt must not be blank" }
         check(state == ModelState.READY) { "Model is not ready" }
         conversation?.sendMessage(prompt)?.toString() ?: error("Conversation is not initialized")
     }
@@ -131,12 +154,21 @@ fun main() = application {
         var learnFailures by remember { mutableStateOf(true) }
         var researchEnabled by remember { mutableStateOf(true) }
         val events = remember { mutableStateOf(listOf<String>()) }
-        val observer = remember { object : AgentObserver { override fun onEvent(event: AgentEvent) { metrics.onEvent(event); events.value = (events.value + event.toString()).takeLast(120) } } }
+        val observer = remember {
+            object : AgentObserver {
+                override fun onEvent(event: AgentEvent) {
+                    metrics.onEvent(event)
+                    events.value = (events.value + event.toString()).takeLast(120)
+                }
+            }
+        }
 
         fun rebuildAgent() {
             val r = runner ?: return
             scope.launch {
-                val pluginTools = if (researchEnabled) runCatching { pluginRegistry.allTools() }.getOrDefault(emptyList()) else emptyList()
+                val pluginTools = if (researchEnabled) {
+                    runCatching { pluginRegistry.allTools() }.getOrDefault(emptyList())
+                } else emptyList()
                 val tools = buildList {
                     add(CalculatorTool())
                     add(DateTimeTool())
@@ -191,25 +223,33 @@ fun main() = application {
                         1 -> ResearchPage(task, { task = it }, answer, researchEnabled) {
                             tab = 0
                             scope.launch {
-                                runCatching { agent!!.run("Research this topic thoroughly on the public web and produce a cited report: $task").answer }
+                                runCatching {
+                                    agent!!.run(
+                                        "Research this topic thoroughly on the public web and produce a cited report: $task"
+                                    ).answer
+                                }
                                     .onSuccess { answer = it; status = "Research completed" }
                                     .onFailure { answer = "Research error: ${it.message}" }
                             }
                         }
                         2 -> ModelPage(modelPath, { modelPath = it }, status, {
-                            val chooser = JFileChooser().apply { dialogTitle = "Select Gemma 4 E4B .litertlm model" }
+                            val chooser = JFileChooser().apply {
+                                dialogTitle = "Select Gemma 4 E4B .litertlm model"
+                            }
                             if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
                                 modelPath = chooser.selectedFile.absolutePath
                                 scope.launch {
                                     runCatching {
-                                        status = "Loading model..."
+                                        status = "Loading Gemma 4 E4B (CPU safe mode)..."
                                         val r = DesktopModelRunner(modelPath)
                                         r.start()
                                         runner?.close()
                                         runner = r
                                         rebuildAgent()
-                                        status = "Gemma 4 E4B ready"
-                                    }.onFailure { status = "Load failed: ${it.message}" }
+                                        status = "Gemma 4 E4B ready (CPU / 8K context / cache disabled)"
+                                    }.onFailure {
+                                        status = "Load failed: ${it::class.simpleName}: ${it.message}"
+                                    }
                                 }
                             }
                         }, {
