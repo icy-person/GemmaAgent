@@ -25,6 +25,7 @@ class AndroidMemoryStore(context: Context) : MemoryStore, AutoCloseable {
 
     override suspend fun store(experience: Experience) = withContext(Dispatchers.IO) {
         rust.store(experience)
+        Unit
     }
 
     override suspend fun count(): Long = withContext(Dispatchers.IO) { rust.count() }
