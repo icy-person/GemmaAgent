@@ -39,7 +39,7 @@ private class AndroidFileTool(private val root: File) : AgentTool {
             "delete" -> { require(target != root) { "Cannot delete workspace root" }; ToolResult(target.deleteRecursively(), "deleted=${target.name}") }
             "exists" -> ToolResult(true, target.exists().toString())
             "list" -> ToolResult(true, target.listFiles()?.joinToString("\n") { if (it.isDirectory) "[DIR] ${it.name}" else "${it.name} (${it.length()} bytes)" } ?: "empty")
-            "mkdir" -> { target.mkdirs(); ToolResult(true, "created") }
+            "mkdir" -> { require(target.mkdirs() || target.isDirectory) { "Cannot create directory" }; ToolResult(true, "created") }
             else -> ToolResult(false, "Unknown filesystem action: $action")
         }
     }.getOrElse { ToolResult(false, "filesystem error: ${it.message}") }
@@ -55,15 +55,29 @@ private class AndroidHttpTool : AgentTool {
     override val definition = ToolDefinition("http", "GET or POST a URL and return bounded text response.", "network", setOf(Permission.NETWORK), dangerous = true)
     override suspend fun execute(argumentsJson: String): ToolResult = runCatching {
         val o = json.parseToJsonElement(argumentsJson).jsonObject
-        val url = o["url"]?.jsonPrimitive?.content ?: error("url required")
-        val method = o["method"]?.jsonPrimitive?.content?.uppercase() ?: "GET"
-        val c = URL(url).openConnection() as HttpURLConnection
-        c.requestMethod = method; c.connectTimeout = 10_000; c.readTimeout = 20_000
-        if (method == "POST") { c.doOutput = true; c.outputStream.use { it.write(o["body"]?.jsonPrimitive?.content.orEmpty().toByteArray()) } }
-        val code = c.responseCode
-        val stream = if (code in 200..399) c.inputStream else c.errorStream
-        val body = stream?.bufferedReader()?.use { it.readText().take(50_000) } ?: ""
-        c.disconnect(); ToolResult(code in 200..399, "HTTP $code\n$body", metadata = mapOf("status" to code.toString()))
+        val rawUrl = o["url"]?.jsonPrimitive?.content ?: error("url required")
+        val uri = Uri.parse(rawUrl)
+        require(uri.scheme == "http" || uri.scheme == "https") { "Only HTTP(S) URLs are allowed" }
+        val method = (o["method"]?.jsonPrimitive?.content ?: "GET").uppercase()
+        require(method == "GET" || method == "POST") { "Only GET and POST are supported" }
+        val c = URL(rawUrl).openConnection() as HttpURLConnection
+        try {
+            c.requestMethod = method
+            c.connectTimeout = 10_000
+            c.readTimeout = 20_000
+            c.instanceFollowRedirects = true
+            if (method == "POST") {
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                c.outputStream.use { it.write(o["body"]?.jsonPrimitive?.content.orEmpty().toByteArray()) }
+            }
+            val code = c.responseCode
+            val stream = if (code in 200..399) c.inputStream else c.errorStream
+            val body = stream?.bufferedReader()?.use { it.readText().take(50_000) } ?: ""
+            ToolResult(code in 200..399, "HTTP $code\n$body", metadata = mapOf("status" to code.toString(), "url" to rawUrl))
+        } finally {
+            c.disconnect()
+        }
     }.getOrElse { ToolResult(false, "HTTP error: ${it.message}") }
 }
 
@@ -94,9 +108,11 @@ private class AndroidIntentTool : AgentTool {
     override val definition = ToolDefinition("intent", "Open an HTTP/HTTPS URL in the user's browser.", "android", setOf(Permission.SYSTEM), dangerous = true)
     override suspend fun execute(argumentsJson: String): ToolResult = runCatching {
         val context = AndroidAgentContext.context ?: error("Android context unavailable")
-        val uri = json.parseToJsonElement(argumentsJson).jsonObject["url"]?.jsonPrimitive?.content ?: error("url required")
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        ToolResult(true, "intent sent")
+        val uriString = json.parseToJsonElement(argumentsJson).jsonObject["url"]?.jsonPrimitive?.content ?: error("url required")
+        val uri = Uri.parse(uriString)
+        require(uri.scheme == "http" || uri.scheme == "https") { "Only HTTP(S) URLs can be opened" }
+        context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        ToolResult(true, "intent sent", metadata = mapOf("url" to uriString))
     }.getOrElse { ToolResult(false, "intent error: ${it.message}") }
 }
 
@@ -115,5 +131,7 @@ fun copyToClipboard(context: Context, text: String) {
 }
 
 fun openUri(context: Context, uri: String) {
-    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    val parsed = Uri.parse(uri)
+    require(parsed.scheme == "http" || parsed.scheme == "https") { "Only HTTP(S) URIs can be opened" }
+    context.startActivity(Intent(Intent.ACTION_VIEW, parsed).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }
