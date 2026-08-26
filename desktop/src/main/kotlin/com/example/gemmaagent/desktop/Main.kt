@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Button
@@ -366,7 +365,6 @@ private fun ActivityPanel(events: List<String>, metrics: Map<String, Long>) {
             Text(events.takeLast(80).joinToString("\n").ifBlank { "Waiting…" }, Modifier.weight(1f).verticalScroll(rememberScrollState()), style = MaterialTheme.typography.caption)
             Divider(Modifier.padding(vertical = 8.dp))
             Text("thinking=${metrics["thinking"] ?: 0}  tools=${metrics["toolCalls"] ?: 0}", style = MaterialTheme.typography.caption)
-            Text("failures=${metrics["toolFailures"] ?: 0}  done=${metrics["completed"] ?: 0}", style = MaterialTheme.typography.caption)
         }
     }
 }
