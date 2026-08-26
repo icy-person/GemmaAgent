@@ -13,13 +13,11 @@ class JvmMemoryStore(private val root: File = File(System.getProperty("user.home
 
     init { root.mkdirs() }
 
-    @Synchronized
     override suspend fun search(query: String, limit: Int): List<Experience> {
         val terms = tokenize(query)
         return read(experiences, ListSerializer(Experience.serializer())).sortedByDescending { score(terms, it.task + " " + it.plan + " " + it.result, it.score, it.success) }.take(limit)
     }
 
-    @Synchronized
     override suspend fun store(experience: Experience) {
         val current = read(experiences, ListSerializer(Experience.serializer()))
         val value = if (experience.id.isBlank()) experience.copy(id = stableId(experience.task, experience.createdAtEpochMs)) else experience
@@ -28,7 +26,6 @@ class JvmMemoryStore(private val root: File = File(System.getProperty("user.home
 
     override suspend fun count(): Long = read(experiences, ListSerializer(Experience.serializer())).size.toLong()
 
-    @Synchronized
     override suspend fun saveFact(fact: MemoryFact) {
         val current = read(facts, ListSerializer(MemoryFact.serializer()))
         facts.writeText(json.encodeToString(ListSerializer(MemoryFact.serializer()), current.filterNot { it.key == fact.key } + fact))
@@ -41,7 +38,6 @@ class JvmMemoryStore(private val root: File = File(System.getProperty("user.home
         }.take(limit)
     }
 
-    @Synchronized
     override suspend fun saveSkill(skill: Skill) {
         val current = read(skills, ListSerializer(Skill.serializer()))
         skills.writeText(json.encodeToString(ListSerializer(Skill.serializer()), current.filterNot { it.name == skill.name } + skill))
