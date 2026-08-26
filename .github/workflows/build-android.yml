@@ -22,16 +22,19 @@ jobs:
           java-version: '21'
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-      - name: Install NDK
-        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;29.0.13113456"
+      - name: Install Android SDK/NDK
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;35.0.0" "ndk;29.0.13113456"
       - name: Build Rust Android libraries
         run: |
           rustup target add aarch64-linux-android x86_64-linux-android
           cargo install cargo-ndk --locked
           ./rust-core/build_android.sh
-      - name: Build APK
+      - name: Run shared tests
         run: |
           chmod +x gradlew
+          ./gradlew :shared:jvmTest --no-daemon --stacktrace
+      - name: Build APK
+        run: |
           if [ "${{ inputs.build_type }}" = "release" ]; then
             ./gradlew :app:assembleRelease --no-daemon --stacktrace
             APK=app/build/outputs/apk/release/app-release.apk
