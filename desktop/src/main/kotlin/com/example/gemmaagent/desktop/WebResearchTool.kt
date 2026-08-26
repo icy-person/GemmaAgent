@@ -15,7 +15,7 @@ class WebResearchTool(
 
     override val definition = ToolDefinition(
         name = "web_research",
-        description = "Research the public web. Searches, downloads pages, extracts main content from HTML, ranks relevant passages, removes duplicates/noise, follows relevant links, and returns source URLs with evidence. Input JSON: {query:string, max_results?:number, crawl_depth?:number}",
+        description = "Research the public web using a local browser-capable engine. It can execute JavaScript with Chromium, parse the rendered DOM, rank evidence, deduplicate sources and follow relevant links. Input JSON: {query:string, max_results?:number, crawl_depth?:number, javascript?:boolean}",
         category = "web",
         permissions = setOf(Permission.NETWORK),
         dangerous = false,
@@ -27,22 +27,28 @@ class WebResearchTool(
         require(query.isNotBlank()) { "query is required" }
         val maxResults = args["max_results"]?.jsonPrimitive?.content?.toIntOrNull()?.coerceIn(1, 12) ?: 8
         val crawlDepth = args["crawl_depth"]?.jsonPrimitive?.content?.toIntOrNull()?.coerceIn(0, 1) ?: 1
+        val javascript = args["javascript"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true
         val report = engine.research(
             query,
             WebResearchEngine.Config(
                 maxResults = maxResults,
                 crawlDepth = crawlDepth,
                 maxTotalChars = 70_000,
+                javascriptEnabled = javascript,
             ),
         )
+        val rendered = report.sources.count { it.renderedWithJavaScript }
         val out = buildString {
             appendLine("WEB RESEARCH REPORT")
             appendLine("Query: $query")
             appendLine("Sources: ${report.sources.size}")
+            appendLine("JavaScript renderer available: ${report.javascriptAvailable}")
+            appendLine("Pages rendered with JavaScript: $rendered")
             appendLine()
             report.sources.forEachIndexed { index, source ->
                 appendLine("[${index + 1}] ${source.title}")
                 appendLine("URL: ${source.url}")
+                appendLine("Rendered with JS: ${source.renderedWithJavaScript}")
                 source.chunks.take(8).forEach { chunk ->
                     appendLine("EVIDENCE (${"%.2f".format(chunk.score)}): ${chunk.text}")
                 }
@@ -60,7 +66,9 @@ class WebResearchTool(
                 "sources" to report.sources.size.toString(),
                 "query" to query,
                 "crawlDepth" to crawlDepth.toString(),
-                "engine" to "local-dom-ranker",
+                "javascript" to javascript.toString(),
+                "javascriptRenderer" to rendered.toString(),
+                "engine" to "chromium-dom-ranker",
             ),
         )
     }.getOrElse { ToolResult(false, "Web research failed: ${it.message}") }
