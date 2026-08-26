@@ -106,14 +106,7 @@ class WebResearchEngine(
         val text = selected.joinToString("\n\n") { it.first }.take(maxPageChars)
         val chunks = selected.map { (block, score) -> Chunk(block, score) }
         val links = extractRelevantLinks(doc, URI(url))
-        return Source(
-            url = url,
-            title = title,
-            text = text,
-            chunks = chunks,
-            links = links,
-            renderedWithJavaScript = rendered != null,
-        )
+        return Source(url, title, text, chunks, links, rendered != null)
     }
 
     private fun removeNoise(doc: Document) {
@@ -165,7 +158,7 @@ class WebResearchEngine(
         buildString {
             append(uri.scheme.lowercase())
             append("://")
-            append(uri.host.lowercase())
+            append((uri.host ?: "").lowercase())
             if (uri.port != -1) append(':').append(uri.port)
             append(uri.path.ifBlank { "/" })
         }.removeSuffix("/")
