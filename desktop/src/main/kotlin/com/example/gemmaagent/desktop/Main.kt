@@ -62,6 +62,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.lang.management.ManagementFactory
 import javax.swing.JFileChooser
 
 private enum class ModelState { IDLE, LOADING, READY, FAILED, CLOSED }
@@ -74,18 +75,28 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
 
     suspend fun start() = withContext(Dispatchers.IO) {
         check(state != ModelState.READY) { "Model is already loaded" }
+        val modelFile = File(path)
+        require(modelFile.isFile && modelFile.canRead()) { "Model file is not readable: $path" }
+        require(modelFile.length() > 0L) { "Model file is empty: $path" }
+        require(path.endsWith(".litertlm", ignoreCase = true)) { "Expected a .litertlm model" }
+
+        val modelBytes = modelFile.length()
+        val availableBefore = availablePhysicalMemory()
+        val safetyHeadroom = 1_250_000_000L
+        require(availableBefore > modelBytes + safetyHeadroom) {
+            "Not enough free RAM to safely load this model. " +
+                "Model=${formatGiB(modelBytes)}, available=${formatGiB(availableBefore)}. " +
+                "Close memory-heavy apps or use a smaller model."
+        }
+
         state = ModelState.LOADING
         try {
-            val modelFile = File(path)
-            require(modelFile.isFile && modelFile.canRead()) { "Model file is not readable: $path" }
-            require(modelFile.length() > 0L) { "Model file is empty: $path" }
-            require(path.endsWith(".litertlm", ignoreCase = true)) { "Expected a .litertlm model" }
             val config = EngineConfig(
                 modelPath = modelFile.absolutePath,
-                backend = Backend.CPU(threadCount = 2),
+                backend = Backend.CPU(threadCount = 1),
                 visionBackend = null,
                 audioBackend = null,
-                maxNumTokens = 8192,
+                maxNumTokens = 2048,
                 cacheDir = ":nocache",
             )
             val newEngine = Engine(config)
@@ -128,6 +139,20 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
         state = ModelState.CLOSED
     }
 }
+
+private fun availablePhysicalMemory(): Long = runCatching {
+    val bean = ManagementFactory.getOperatingSystemMXBean()
+    val method = bean.javaClass.getMethod("getFreeMemorySize")
+    (method.invoke(bean) as Number).toLong()
+}.getOrElse {
+    runCatching {
+        val bean = ManagementFactory.getOperatingSystemMXBean()
+        val method = bean.javaClass.getMethod("getFreePhysicalMemorySize")
+        (method.invoke(bean) as Number).toLong()
+    }.getOrDefault(Long.MAX_VALUE)
+}
+
+private fun formatGiB(bytes: Long): String = "%.1f GiB".format(bytes / 1073741824.0)
 
 private fun eventText(event: AgentEvent): String = when (event) {
     is AgentEvent.Started -> "Started · ${event.task.take(120)}"
@@ -231,13 +256,13 @@ fun main() = application {
                                 modelPath = chooser.selectedFile.absolutePath
                                 scope.launch {
                                     runCatching {
-                                        status = "Loading Gemma 4 E4B…"
+                                        status = "Checking RAM…"
                                         val r = DesktopModelRunner(modelPath)
                                         r.start()
                                         runner?.close()
                                         runner = r
                                         rebuildAgent()
-                                    }.onSuccess { status = "Gemma 4 E4B · CPU · 8K" }
+                                    }.onSuccess { status = "Gemma 4 E4B · CPU · 2K" }
                                         .onFailure { status = "Load failed: ${it::class.simpleName}: ${it.message}" }
                                 }
                             }
