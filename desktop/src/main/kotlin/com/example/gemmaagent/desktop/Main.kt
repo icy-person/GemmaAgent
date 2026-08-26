@@ -1,6 +1,8 @@
 package com.example.gemmaagent.desktop
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,30 +10,36 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Button
 import androidx.compose.material.Card
-import androidx.compose.material.Checkbox
 import androidx.compose.material.Divider
+import androidx.compose.material.IconButton
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedButton
 import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.RadioButton
 import androidx.compose.material.Slider
-import androidx.compose.material.Tab
-import androidx.compose.material.TabRow
+import androidx.compose.material.Surface
 import androidx.compose.material.Text
+import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
@@ -57,25 +65,23 @@ import com.google.ai.edge.litertlm.EngineConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.awt.EventQueue
 import java.io.File
 import javax.swing.JFileChooser
 
 private enum class ModelState { IDLE, LOADING, READY, FAILED, CLOSED }
+private data class ChatMessage(val role: String, val text: String)
 
 private class DesktopModelRunner(private val path: String) : com.example.gemmaagent.shared.ModelRunner, AutoCloseable {
     private var engine: Engine? = null
     private var conversation: Conversation? = null
     @Volatile private var state = ModelState.IDLE
-    fun state(): ModelState = state
 
     suspend fun start() = withContext(Dispatchers.IO) {
         check(state != ModelState.READY) { "Model is already loaded" }
         state = ModelState.LOADING
         try {
             val modelFile = File(path)
-            require(modelFile.isFile) { "Model file does not exist: $path" }
-            require(modelFile.canRead()) { "Model file is not readable: $path" }
+            require(modelFile.isFile && modelFile.canRead()) { "Model file is not readable: $path" }
             require(modelFile.length() > 0L) { "Model file is empty: $path" }
             require(path.endsWith(".litertlm", ignoreCase = true)) { "Expected a .litertlm model" }
             val config = EngineConfig(
@@ -102,19 +108,18 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
     }
 
     override suspend fun reset() = withContext(Dispatchers.IO) {
-        val activeEngine = engine ?: error("Model is not initialized")
+        val active = engine ?: error("Model is not initialized")
         conversation?.close()
-        conversation = activeEngine.createConversation(
+        conversation = active.createConversation(
             ConversationConfig(
                 systemInstruction = Contents.of(
-                    "You are GemmaAgent, a local autonomous agent. Use available tools, verify tool results, and do not invent evidence."
+                    "You are GemmaAgent, a local autonomous agent. Use available tools, verify results, and do not invent evidence."
                 )
             )
         )
     }
 
     override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
-        require(prompt.isNotBlank()) { "Prompt must not be blank" }
         check(state == ModelState.READY) { "Model is not ready" }
         conversation?.sendMessage(prompt)?.toString() ?: error("Conversation is not initialized")
     }
@@ -128,58 +133,56 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
     }
 }
 
-private fun formatLiveEvent(event: AgentEvent): String = when (event) {
-    is AgentEvent.Started -> "▶ شروع کار: ${event.task.take(120)}"
-    is AgentEvent.Stage -> "• ${event.name}: ${event.detail.take(180)}"
-    is AgentEvent.Thinking -> "🧠 در حال پردازش مرحله ${event.iteration}"
-    is AgentEvent.ModelOutput -> "◌ خروجی مدل دریافت شد (${event.text.length} chars)"
-    is AgentEvent.ToolRequested -> "🛠 اجرای ابزار: ${event.call.name} ${event.call.argumentsJson.take(180)}"
-    is AgentEvent.ToolCompleted -> "✓ ابزار ${event.call.name}: ${if (event.result.ok) "موفق" else "خطا"} (${event.result.durationMs} ms) — ${event.result.content.take(220)}"
-    is AgentEvent.Reflection -> "↻ بررسی نتیجه: ${event.text.take(220)}"
-    is AgentEvent.Finished -> "■ ${if (event.success) "کار تمام شد" else "کار متوقف شد"}"
-    is AgentEvent.Failed -> "✕ خطا: ${event.message.take(220)}"
+private fun eventText(event: AgentEvent): String = when (event) {
+    is AgentEvent.Started -> "Started · ${event.task.take(120)}"
+    is AgentEvent.Stage -> "${event.name} · ${event.detail.take(180)}"
+    is AgentEvent.Thinking -> "Thinking · step ${event.iteration}"
+    is AgentEvent.ModelOutput -> "Model output · ${event.text.take(180)}"
+    is AgentEvent.ToolRequested -> "Tool · ${event.call.name} ${event.call.argumentsJson.take(180)}"
+    is AgentEvent.ToolCompleted -> "Tool result · ${event.call.name} · ${if (event.result.ok) "success" else "failed"} · ${event.result.durationMs} ms"
+    is AgentEvent.Reflection -> "Verification · ${event.text.take(180)}"
+    is AgentEvent.Finished -> "Finished · ${if (event.success) "success" else "stopped"}"
+    is AgentEvent.Failed -> "Error · ${event.message.take(180)}"
 }
 
 fun main() = application {
-    Window(onCloseRequest = ::exitApplication, title = "GemmaAgent Desktop") {
-        var tab by remember { mutableStateOf(0) }
-        var modelPath by remember { mutableStateOf("") }
+    Window(onCloseRequest = ::exitApplication, title = "GemmaAgent") {
+        var dark by remember { mutableStateOf(true) }
+        var activeChat by remember { mutableStateOf("New chat") }
         var task by remember { mutableStateOf("") }
-        var answer by remember { mutableStateOf("") }
-        var status by remember { mutableStateOf("No model loaded") }
+        var modelPath by remember { mutableStateOf("") }
         var runner by remember { mutableStateOf<DesktopModelRunner?>(null) }
         var agent by remember { mutableStateOf<AgentEngine?>(null) }
-        val memory = remember { JvmMemoryStore() }
-        val pluginRegistry = remember { PluginRegistry() }
-        val metrics = remember { AgentMetrics() }
-        val scope = rememberCoroutineScope()
+        var status by remember { mutableStateOf("Load Gemma 4 E4B to begin") }
+        var running by remember { mutableStateOf(false) }
+        var showActivity by remember { mutableStateOf(true) }
         var mode by remember { mutableStateOf(AgentMode.ASSISTED) }
         var maxIterations by remember { mutableStateOf(30f) }
         var memoryTopK by remember { mutableStateOf(8f) }
-        var skillsEnabled by remember { mutableStateOf(true) }
-        var reflectionEnabled by remember { mutableStateOf(true) }
-        var learnFailures by remember { mutableStateOf(true) }
-        var researchEnabled by remember { mutableStateOf(true) }
-        var running by remember { mutableStateOf(false) }
-        val events = remember { mutableStateOf(listOf<String>()) }
+
+        val messages = remember { mutableStateListOf<ChatMessage>() }
+        val activity = remember { mutableStateListOf<String>() }
+        val memory = remember { JvmMemoryStore() }
+        val registry = remember { PluginRegistry() }
+        val metrics = remember { AgentMetrics() }
+        val scope = rememberCoroutineScope()
+
         val observer = remember {
             object : AgentObserver {
                 override fun onEvent(event: AgentEvent) {
                     metrics.onEvent(event)
-                    val line = formatLiveEvent(event)
-                    EventQueue.invokeLater {
-                        events.value = (events.value + line).takeLast(160)
-                        when (event) {
-                            is AgentEvent.Started -> status = "Agent started"
-                            is AgentEvent.Thinking -> status = "Thinking — iteration ${event.iteration}"
-                            is AgentEvent.ToolRequested -> status = "Running ${event.call.name}"
-                            is AgentEvent.ToolCompleted -> status = "Tool ${event.call.name}: ${if (event.result.ok) "done" else "failed"}"
-                            is AgentEvent.Reflection -> status = "Verifying result"
-                            is AgentEvent.Finished -> status = if (event.success) "Task completed" else "Task stopped"
-                            is AgentEvent.Failed -> status = "Task failed"
-                            is AgentEvent.Stage -> status = event.name
-                            is AgentEvent.ModelOutput -> status = "Model responded"
-                        }
+                    activity += eventText(event)
+                    while (activity.size > 180) activity.removeAt(0)
+                    status = when (event) {
+                        is AgentEvent.Started -> "Working…"
+                        is AgentEvent.Thinking -> "Thinking · step ${event.iteration}"
+                        is AgentEvent.ToolRequested -> "Using ${event.call.name}…"
+                        is AgentEvent.ToolCompleted -> "${event.call.name}: ${if (event.result.ok) "done" else "failed"}"
+                        is AgentEvent.Reflection -> "Verifying…"
+                        is AgentEvent.Finished -> if (event.success) "Ready" else "Stopped"
+                        is AgentEvent.Failed -> "Error"
+                        is AgentEvent.Stage -> event.name
+                        is AgentEvent.ModelOutput -> "Generating…"
                     }
                 }
             }
@@ -188,9 +191,7 @@ fun main() = application {
         fun rebuildAgent() {
             val r = runner ?: return
             scope.launch {
-                val pluginTools = if (researchEnabled) {
-                    runCatching { pluginRegistry.allTools() }.getOrDefault(emptyList())
-                } else emptyList()
+                val pluginTools = runCatching { registry.allTools() }.getOrDefault(emptyList())
                 val tools = buildList {
                     add(CalculatorTool())
                     add(DateTimeTool())
@@ -205,9 +206,9 @@ fun main() = application {
                     config = AgentConfig(
                         maxIterations = maxIterations.toInt(),
                         memoryTopK = memoryTopK.toInt(),
-                        skillTopK = if (skillsEnabled) 5 else 0,
-                        reflectionEnabled = reflectionEnabled,
-                        learnFromFailures = learnFailures,
+                        skillTopK = 5,
+                        reflectionEnabled = true,
+                        learnFromFailures = true,
                         mode = mode,
                     ),
                     observer = observer,
@@ -215,94 +216,56 @@ fun main() = application {
             }
         }
 
-        scope.launch { runCatching { pluginRegistry.install(WebResearchPlugin()) } }
+        scope.launch { runCatching { registry.install(WebResearchPlugin()) } }
 
         MaterialTheme {
-            Row(Modifier.fillMaxSize()) {
-                Column(Modifier.width(210.dp).fillMaxHeight().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("GemmaAgent", style = MaterialTheme.typography.h5)
-                    Text("Local autonomous agent")
-                    Divider()
-                    listOf("Agent", "Research", "Model", "Memory", "Tools", "Learning", "Settings", "Logs").forEachIndexed { index, title ->
-                        Button(onClick = { tab = index }, Modifier.fillMaxWidth()) { Text(title) }
-                    }
-                }
-                Column(Modifier.fillMaxSize().padding(16.dp)) {
-                    TabRow(selectedTabIndex = tab.coerceIn(0, 7)) {
-                        listOf("Agent", "Research", "Model", "Memory", "Tools", "Learning", "Settings", "Logs").forEachIndexed { i, title ->
-                            Tab(tab == i, { tab = i }, text = { Text(title) })
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    when (tab) {
-                        0 -> AgentPage(
-                            task = task,
-                            onTask = { task = it },
-                            answer = answer,
-                            status = status,
-                            enabled = agent != null && !running,
-                            running = running,
-                            events = events.value,
-                        ) {
-                            running = true
-                            events.value = (events.value + "▶ اجرای Task شروع شد").takeLast(160)
-                            scope.launch {
-                                runCatching { agent!!.run(task).answer }
-                                    .onSuccess { answer = it }
-                                    .onFailure { answer = "Error: ${it.message}" }
-                                running = false
-                            }
-                        }
-                        1 -> ResearchPage(task, { task = it }, answer, researchEnabled) {
-                            tab = 0
-                            if (!running) {
-                                running = true
-                                scope.launch {
-                                    runCatching {
-                                        agent!!.run(
-                                            "Research this topic thoroughly on the public web and produce a cited report: $task"
-                                        ).answer
-                                    }
-                                        .onSuccess { answer = it }
-                                        .onFailure { answer = "Research error: ${it.message}" }
-                                    running = false
-                                }
-                            }
-                        }
-                        2 -> ModelPage(modelPath, { modelPath = it }, status, {
-                            val chooser = JFileChooser().apply {
-                                dialogTitle = "Select Gemma 4 E4B .litertlm model"
-                            }
+            Surface(Modifier.fillMaxSize(), color = if (dark) Color(0xFF212121) else Color(0xFFFFFFFF)) {
+                Row(Modifier.fillMaxSize()) {
+                    ChatSidebar(activeChat, { activeChat = it }, {
+                        activeChat = "New chat"
+                        messages.clear()
+                        activity.clear()
+                        task = ""
+                    }, dark) { dark = !dark }
+
+                    Column(Modifier.weight(1f).fillMaxHeight()) {
+                        ChatHeader(status, runner != null, { showActivity = !showActivity }, {
+                            val chooser = JFileChooser().apply { dialogTitle = "Select Gemma 4 E4B .litertlm model" }
                             if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
                                 modelPath = chooser.selectedFile.absolutePath
                                 scope.launch {
                                     runCatching {
-                                        status = "Loading Gemma 4 E4B (CPU safe mode)..."
+                                        status = "Loading Gemma 4 E4B…"
                                         val r = DesktopModelRunner(modelPath)
                                         r.start()
                                         runner?.close()
                                         runner = r
                                         rebuildAgent()
-                                        status = "Gemma 4 E4B ready (CPU / 8K context / cache disabled)"
-                                    }.onFailure {
-                                        status = "Load failed: ${it::class.simpleName}: ${it.message}"
+                                    }.onSuccess { status = "Gemma 4 E4B · CPU · 8K" }
+                                        .onFailure { status = "Load failed: ${it::class.simpleName}: ${it.message}" }
+                                }
+                            }
+                        })
+
+                        Row(Modifier.weight(1f).fillMaxWidth()) {
+                            Column(Modifier.weight(1f).fillMaxHeight()) {
+                                ChatTimeline(messages)
+                                Composer(task, { task = it }, agent != null, running) {
+                                    val prompt = task.trim()
+                                    if (prompt.isEmpty() || agent == null || running) return@Composer
+                                    task = ""
+                                    messages += ChatMessage("user", prompt)
+                                    running = true
+                                    showActivity = true
+                                    scope.launch {
+                                        runCatching { agent!!.run(prompt).answer }
+                                            .onSuccess { messages += ChatMessage("assistant", it) }
+                                            .onFailure { messages += ChatMessage("assistant", "Error: ${it.message}") }
+                                        running = false
                                     }
                                 }
                             }
-                        }, {
-                            runner?.close()
-                            runner = null
-                            agent = null
-                            status = "Model unloaded"
-                        })
-                        3 -> SimpleInfoPage("Memory", "Persistent experiences, facts and learned workflows are used by the agent across runs.")
-                        4 -> SimpleInfoPage("Tools", "Calculator, date/time, filesystem, file search, HTTP, process execution and the Web Research plugin.")
-                        5 -> LearningPage(learnFailures, { learnFailures = it; rebuildAgent() }, skillsEnabled, { skillsEnabled = it; rebuildAgent() }, reflectionEnabled, { reflectionEnabled = it; rebuildAgent() })
-                        6 -> SettingsPage(mode, { mode = it; rebuildAgent() }, maxIterations, { maxIterations = it; rebuildAgent() }, memoryTopK, { memoryTopK = it; rebuildAgent() }, researchEnabled, { researchEnabled = it; rebuildAgent() })
-                        7 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                            Text("Metrics: ${metrics.snapshot()}")
-                            Spacer(Modifier.height(8.dp))
-                            Text(events.value.takeLast(120).joinToString("\n"))
+                            if (showActivity) ActivityPanel(activity, metrics.snapshot())
                         }
                     }
                 }
@@ -311,45 +274,102 @@ fun main() = application {
     }
 }
 
-@Composable private fun AgentPage(
-    task: String,
-    onTask: (String) -> Unit,
-    answer: String,
-    status: String,
-    enabled: Boolean,
-    running: Boolean,
-    events: List<String>,
-    run: () -> Unit,
-) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Agent", style = MaterialTheme.typography.h5)
-            Text(if (running) "● LIVE" else "○ Idle")
+@Composable
+private fun ChatSidebar(active: String, onSelect: (String) -> Unit, onNew: () -> Unit, dark: Boolean, toggleTheme: () -> Unit) {
+    val bg = if (dark) Color(0xFF171717) else Color(0xFFF7F7F8)
+    Column(Modifier.width(260.dp).fillMaxHeight().background(bg).padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = onNew, Modifier.fillMaxWidth()) { Text("+  New chat") }
+        Text("Chats", style = MaterialTheme.typography.caption, modifier = Modifier.padding(8.dp))
+        TextButton(onClick = { onSelect("GemmaAgent") }, Modifier.fillMaxWidth()) { Text(if (active == "GemmaAgent") "●  GemmaAgent" else "  GemmaAgent") }
+        TextButton(onClick = { onSelect("Research") }, Modifier.fillMaxWidth()) { Text(if (active == "Research") "●  Research" else "  Research") }
+        Spacer(Modifier.weight(1f))
+        Divider()
+        TextButton(onClick = toggleTheme, Modifier.fillMaxWidth()) { Text(if (dark) "Light mode" else "Dark mode") }
+        Text("GemmaAgent · local", style = MaterialTheme.typography.caption, modifier = Modifier.padding(8.dp))
+    }
+}
+
+@Composable
+private fun ChatHeader(status: String, loaded: Boolean, onActivity: () -> Unit, onModel: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("GemmaAgent", fontWeight = FontWeight.SemiBold)
+            Text(status, style = MaterialTheme.typography.caption)
         }
-        Text(status)
-        OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Task") }, minLines = 5)
-        Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text(if (running) "Running…" else "Run Agent") }
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Live activity", style = MaterialTheme.typography.h6)
-                Text(
-                    events.takeLast(40).joinToString("\n").ifBlank { "Waiting for an agent run…" },
-                    Modifier.fillMaxWidth().height(220.dp).verticalScroll(rememberScrollState()),
-                )
+        Text(if (loaded) "● Local" else "○ No model", style = MaterialTheme.typography.caption)
+        Spacer(Modifier.width(8.dp))
+        TextButton(onClick = onActivity) { Text("Activity") }
+        TextButton(onClick = onModel) { Text("Model") }
+    }
+    Divider()
+}
+
+@Composable
+private fun ChatTimeline(messages: List<ChatMessage>) {
+    Box(Modifier.weight(1f).fillMaxWidth()) {
+        if (messages.isEmpty()) {
+            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Text("What can I help you with?", style = MaterialTheme.typography.h5)
+                Spacer(Modifier.height(10.dp))
+                Text("Research the web, inspect files, use RAG, work with GitHub, or build code.")
             }
-        }
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(14.dp)) {
-                Text("Final answer", style = MaterialTheme.typography.h6)
-                Text(answer.ifBlank { "No final answer yet." })
+        } else {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 22.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                messages.forEach { MessageRow(it) }
             }
         }
     }
 }
 
-@Composable private fun ResearchPage(task: String, onTask: (String) -> Unit, answer: String, enabled: Boolean, run: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Web Research", style = MaterialTheme.typography.h5); Text("Search, render JavaScript pages, extract relevant evidence and cite sources."); OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Research topic") }, minLines = 5); Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text("Research") }; Card(Modifier.fillMaxSize()) { Text(answer, Modifier.padding(14.dp).verticalScroll(rememberScrollState())) } } }
-@Composable private fun ModelPage(path: String, onPath: (String) -> Unit, status: String, choose: () -> Unit, unload: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Model", style = MaterialTheme.typography.h5); Text(status); OutlinedTextField(path, onPath, Modifier.fillMaxWidth(), label = { Text(".litertlm model path") }); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = choose) { Text("Import / Load") }; OutlinedButton(onClick = unload) { Text("Unload") } } } }
-@Composable private fun LearningPage(learnFailures: Boolean, onFailures: (Boolean) -> Unit, skills: Boolean, onSkills: (Boolean) -> Unit, reflection: Boolean, onReflection: (Boolean) -> Unit) { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Learning", style = MaterialTheme.typography.h5); CheckRow("Learn from failed runs", learnFailures, onFailures); CheckRow("Learn reusable skills", skills, onSkills); CheckRow("Self-reflection / verification", reflection, onReflection); Text("Learning updates external memory and skills; Gemma weights remain unchanged.") } }
-@Composable private fun SettingsPage(mode: AgentMode, onMode: (AgentMode) -> Unit, maxIterations: Float, onIterations: (Float) -> Unit, memoryTopK: Float, onMemory: (Float) -> Unit, research: Boolean, onResearch: (Boolean) -> Unit) { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Settings", style = MaterialTheme.typography.h5); AgentMode.values().forEach { m -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(mode == m, { onMode(m) }); Text(m.name) } }; Text("Max iterations: ${maxIterations.toInt()}"); Slider(maxIterations, onIterations, valueRange = 1f..50f); Text("Memory retrieval: ${memoryTopK.toInt()}"); Slider(memoryTopK, onMemory, valueRange = 0f..20f); CheckRow("Web Research plugin enabled", research, onResearch) } }
-@Composable private fun CheckRow(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) { Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked, onChecked); Text(label) } }
-@Composable private fun SimpleInfoPage(title: String, body: String) { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) { Text(title, style = MaterialTheme.typography.h5); Text(body) } }
+@Composable
+private fun MessageRow(message: ChatMessage) {
+    val isUser = message.role == "user"
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
+        Card(
+            modifier = Modifier.widthIn(max = 820.dp),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+            backgroundColor = if (isUser) Color(0xFF303030) else Color.Transparent,
+            elevation = 0.dp,
+        ) {
+            Text(message.text, Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+        }
+    }
+}
+
+@Composable
+private fun Composer(value: String, onValue: (String) -> Unit, ready: Boolean, running: Boolean, send: () -> Unit) {
+    Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 24.dp, vertical = 12.dp)) {
+        Card(shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp), elevation = 5.dp) {
+            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValue,
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text(if (ready) "Message GemmaAgent…" else "Load Gemma 4 E4B first…") },
+                    maxLines = 7,
+                )
+                Spacer(Modifier.width(8.dp))
+                IconButton(onClick = send, enabled = ready && !running && value.isNotBlank(), modifier = Modifier.size(48.dp)) {
+                    Text(if (running) "…" else "↑", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        Text("GemmaAgent can make mistakes. Check important results.", style = MaterialTheme.typography.caption, modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 6.dp))
+    }
+}
+
+@Composable
+private fun ActivityPanel(events: List<String>, metrics: Map<String, Long>) {
+    Card(Modifier.width(340.dp).fillMaxHeight().padding(10.dp), shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp), elevation = 2.dp) {
+        Column(Modifier.fillMaxSize().padding(14.dp)) {
+            Text("Agent activity", style = MaterialTheme.typography.h6, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            Text("Live", style = MaterialTheme.typography.caption)
+            Spacer(Modifier.height(8.dp))
+            Text(events.takeLast(80).joinToString("\n").ifBlank { "Waiting…" }, Modifier.weight(1f).verticalScroll(rememberScrollState()), style = MaterialTheme.typography.caption)
+            Divider(Modifier.padding(vertical = 8.dp))
+            Text("thinking=${metrics["thinking"] ?: 0}  tools=${metrics["toolCalls"] ?: 0}", style = MaterialTheme.typography.caption)
+            Text("failures=${metrics["toolFailures"] ?: 0}  done=${metrics["completed"] ?: 0}", style = MaterialTheme.typography.caption)
+        }
+    }
+}
