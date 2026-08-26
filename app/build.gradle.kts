@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.compose")
 }
 
 android {
@@ -19,9 +20,11 @@ android {
 
 dependencies {
     implementation(project(":shared"))
+    implementation(compose.runtime)
+    implementation(compose.foundation)
+    implementation(compose.material3)
+    implementation(compose.ui)
     implementation("androidx.activity:activity-compose:1.11.0")
-    implementation("androidx.compose.ui:ui:1.9.1")
-    implementation("androidx.compose.material3:material3:1.4.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("androidx.documentfile:documentfile:1.1.0")
