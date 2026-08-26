@@ -66,7 +66,7 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
         conversation = engine.createConversation(ConversationConfig(systemInstruction = Contents.of("You are GemmaAgent, a local autonomous research and task agent.")))
     }
     override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
-        conversation?.sendMessage(prompt)?.text ?: error("Model is not started")
+        conversation?.sendMessage(prompt)?.toString() ?: error("Model is not started")
     }
     override fun close() { runCatching { conversation?.close() }; runCatching { engine.close() } }
 }
@@ -145,7 +145,7 @@ fun main() = application {
                                 }.onFailure { status = "Load failed: ${it.message}" } }
                             }
                         }, { runner?.close(); runner = null; agent = null; status = "Model unloaded" })
-                        3 -> SimpleInfoPage("Memory", "Persistent memories: ${memory.count()}\nStored experiences and learned workflows remain available across sessions.")
+                        3 -> SimpleInfoPage("Memory", "Persistent memories and learned workflows remain available across sessions.")
                         4 -> SimpleInfoPage("Tools", "Default tools:\n• Calculator\n• Date/time\n• Filesystem/process tools\n• Web research (desktop)\n• Agent memory and learned skills")
                         5 -> LearningPage(learnFailures, { learnFailures = it; rebuildAgent() }, skillsEnabled, { skillsEnabled = it; rebuildAgent() }, reflectionEnabled, { reflectionEnabled = it; rebuildAgent() })
                         6 -> SettingsPage(mode, { mode = it; rebuildAgent() }, maxIterations, { maxIterations = it; rebuildAgent() }, memoryTopK, { memoryTopK = it; rebuildAgent() }, researchEnabled, { researchEnabled = it; rebuildAgent() })
@@ -199,8 +199,10 @@ fun main() = application {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Settings", style = MaterialTheme.typography.h5); Text("Agent mode")
         AgentMode.values().forEach { m -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(mode == m, { onMode(m) }); Text(m.name) } }
-        Text("Max iterations: ${maxIterations.toInt()}"); Slider(maxIterations, onIterations, 1f, 50f)
-        Text("Memory retrieval: ${memoryTopK.toInt()}"); Slider(memoryTopK, onMemory, 0f, 20f)
+        Text("Max iterations: ${maxIterations.toInt()}")
+        Slider(value = maxIterations, onValueChange = onIterations, valueRange = 1f..50f)
+        Text("Memory retrieval: ${memoryTopK.toInt()}")
+        Slider(value = memoryTopK, onValueChange = onMemory, valueRange = 0f..20f)
         CheckRow("Web research enabled by default", research, onResearch)
     }
 }
