@@ -45,7 +45,7 @@ class WebResearchEngine(
         val sources: List<Source>,
         val focusedEvidence: List<String>,
         val javascriptAvailable: Boolean,
-        val searchProvider: String = "duckduckgo",
+        val searchProvider: String = "fallbacks",
     )
 
     fun browserAvailable(): Boolean = chromium.isAvailable()
@@ -55,7 +55,7 @@ class WebResearchEngine(
         val search = search(query)
         val firstResults = search.results.take(config.maxResults)
         if (firstResults.isEmpty()) {
-            throw IllegalStateException("Web search returned no usable results. Provider=${search.provider}; ${search.error ?: "no parser results"}")
+            throw IllegalStateException("Web search returned no usable results. ${search.error ?: "All providers returned no parseable results"}")
         }
         val firstSources = fetchSources(query, firstResults, config)
         val discovered = if (config.crawlDepth > 0) discoverAndFetch(query, firstSources, config) else emptyList()
@@ -199,34 +199,37 @@ class WebResearchEngine(
         val endpoints = listOf(
             "https://html.duckduckgo.com/html/?q=$encoded" to "duckduckgo-html",
             "https://lite.duckduckgo.com/lite/?q=$encoded" to "duckduckgo-lite",
+            "https://www.bing.com/search?q=$encoded&count=10" to "bing-html",
+            "https://search.yahoo.com/search?p=$encoded" to "yahoo-html",
         )
         val errors = mutableListOf<String>()
         for ((endpoint, provider) in endpoints) {
             runCatching {
                 val html = httpGet(endpoint)
-                val results = parseSearchResults(html)
+                val results = parseSearchResults(html, provider)
                 if (results.isNotEmpty()) return SearchResponse(results, provider)
                 errors += "$provider returned no parseable results"
             }.onFailure { errors += "$provider: ${it.message}" }
         }
-        return SearchResponse(emptyList(), "duckduckgo-fallbacks", errors.joinToString("; "))
+        return SearchResponse(emptyList(), "all-search-providers", errors.joinToString("; "))
     }
 
-    private fun parseSearchResults(html: String): List<SearchResult> {
+    private fun parseSearchResults(html: String, provider: String): List<SearchResult> {
         val doc = Jsoup.parse(html)
-        val selectors = listOf(
-            "a.result__a",
-            ".result-link",
-            "a.result__url",
-            "a[href]",
-        )
+        val selectors = when (provider) {
+            "bing-html" -> listOf("li.b_algo h2 a", "li.b_algo a")
+            "yahoo-html" -> listOf("div#web h3 a", "h3 a")
+            else -> listOf("a.result__a", ".result-link", "a.result__url", "a.result__a[href]", "a[href]")
+        }
         for (selector in selectors) {
             val parsed = doc.select(selector).mapNotNull { anchor ->
                 val rawHref = anchor.attr("href").trim()
                 val url = resolveSearchUrl(rawHref) ?: anchor.absUrl("href").trim().takeIf { it.startsWith("http") }
                 if (url.isNullOrBlank()) return@mapNotNull null
+                if (provider == "bing-html" && url.contains("bing.com/search", ignoreCase = true)) return@mapNotNull null
+                if (provider == "yahoo-html" && url.contains("search.yahoo.com", ignoreCase = true)) return@mapNotNull null
                 val title = anchor.text().trim().ifBlank { return@mapNotNull null }
-                val snippet = anchor.parent()?.parent()?.selectFirst(".result__snippet, .result-snippet")?.text().orEmpty()
+                val snippet = anchor.parent()?.parent()?.selectFirst(".result__snippet, .result-snippet, .b_caption p")?.text().orEmpty()
                 SearchResult(url, title, snippet)
             }.distinctBy { canonicalize(it.url) }.take(searchLimit)
             if (parsed.isNotEmpty()) return parsed
@@ -240,11 +243,11 @@ class WebResearchEngine(
         if (rawHref.startsWith("http://") || rawHref.startsWith("https://")) return rawHref
         val candidate = runCatching { URI(rawHref) }.getOrNull() ?: return null
         val query = candidate.rawQuery.orEmpty()
-        val uddg = query.split('&').firstNotNullOfOrNull { part ->
+        val encoded = query.split('&').firstNotNullOfOrNull { part ->
             val pieces = part.split('=', limit = 2)
             if (pieces.size == 2 && pieces[0].equals("uddg", ignoreCase = true)) pieces[1] else null
         }
-        return uddg?.let { runCatching { URLDecoder.decode(it, StandardCharsets.UTF_8) }.getOrNull() }
+        return encoded?.let { runCatching { URLDecoder.decode(it, StandardCharsets.UTF_8) }.getOrNull() }
     }
 
     private fun httpGet(url: String): String {
