@@ -24,8 +24,8 @@ import androidx.compose.material.Slider
 import androidx.compose.material.Tab
 import androidx.compose.material.TabRow
 import androidx.compose.material.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -55,13 +55,12 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.swing.JFileChooser
 
 private enum class ModelState { IDLE, LOADING, READY, FAILED, CLOSED }
-private data class ModelBenchmark(val totalMs: Long, val decodeMs: Long, val tokens: Int, val tokensPerSecond: Double)
 
 private class DesktopModelRunner(private val path: String) : com.example.gemmaagent.shared.ModelRunner, AutoCloseable {
     private var engine: Engine? = null
@@ -82,7 +81,9 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
             state = ModelState.READY
         } catch (t: Throwable) {
             runCatching { engine?.close() }
-            engine = null; conversation = null; state = ModelState.FAILED
+            engine = null
+            conversation = null
+            state = ModelState.FAILED
             throw t
         }
     }
@@ -100,16 +101,13 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
         conversation?.sendMessage(prompt)?.toString() ?: error("Conversation is not initialized")
     }
 
-    suspend fun benchmark(prompt: String = "Reply with exactly: BENCHMARK_OK"): ModelBenchmark = withContext(Dispatchers.Default) {
-        check(state == ModelState.READY) { "Model is not ready" }
-        val started = System.nanoTime()
-        val result = generate(prompt)
-        val totalMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
-        val tokens = result.trim().split(Regex("\\s+")).count { it.isNotEmpty() }.coerceAtLeast(1)
-        ModelBenchmark(totalMs, totalMs, tokens, tokens * 1000.0 / totalMs)
+    override fun close() {
+        runCatching { conversation?.close() }
+        runCatching { engine?.close() }
+        conversation = null
+        engine = null
+        state = ModelState.CLOSED
     }
-
-    override fun close() { runCatching { conversation?.close() }; runCatching { engine?.close() }; conversation = null; engine = null; state = ModelState.CLOSED }
 }
 
 fun main() = application {
@@ -139,8 +137,27 @@ fun main() = application {
             val r = runner ?: return
             scope.launch {
                 val pluginTools = if (researchEnabled) runCatching { pluginRegistry.allTools() }.getOrDefault(emptyList()) else emptyList()
-                val tools = buildList { add(CalculatorTool()); add(DateTimeTool()); add(EchoTool()); addAll(platformTools(File(modelPath).parent ?: ".")); addAll(pluginTools) }
-                agent = AgentEngine(model = r, memory = memory, tools = tools, config = AgentConfig(maxIterations = maxIterations.toInt(), memoryTopK = memoryTopK.toInt(), skillTopK = if (skillsEnabled) 5 else 0, reflectionEnabled = reflectionEnabled, learnFromFailures = learnFailures, mode = mode), observer = observer)
+                val tools = buildList {
+                    add(CalculatorTool())
+                    add(DateTimeTool())
+                    add(EchoTool())
+                    addAll(platformTools(File(modelPath).parent ?: "."))
+                    addAll(pluginTools)
+                }
+                agent = AgentEngine(
+                    model = r,
+                    memory = memory,
+                    tools = tools,
+                    config = AgentConfig(
+                        maxIterations = maxIterations.toInt(),
+                        memoryTopK = memoryTopK.toInt(),
+                        skillTopK = if (skillsEnabled) 5 else 0,
+                        reflectionEnabled = reflectionEnabled,
+                        learnFromFailures = learnFailures,
+                        mode = mode,
+                    ),
+                    observer = observer,
+                )
             }
         }
 
@@ -149,21 +166,67 @@ fun main() = application {
         MaterialTheme {
             Row(Modifier.fillMaxSize()) {
                 Column(Modifier.width(210.dp).fillMaxHeight().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("GemmaAgent", style = MaterialTheme.typography.h5); Text("Local autonomous agent"); Divider()
-                    listOf("Agent", "Research", "Model", "Memory", "Tools", "Learning", "Settings", "Logs").forEachIndexed { index, title -> Button(onClick = { tab = index }, Modifier.fillMaxWidth()) { Text(title) } }
+                    Text("GemmaAgent", style = MaterialTheme.typography.h5)
+                    Text("Local autonomous agent")
+                    Divider()
+                    listOf("Agent", "Research", "Model", "Memory", "Tools", "Learning", "Settings", "Logs").forEachIndexed { index, title ->
+                        Button(onClick = { tab = index }, Modifier.fillMaxWidth()) { Text(title) }
+                    }
                 }
                 Column(Modifier.fillMaxSize().padding(16.dp)) {
-                    TabRow(selectedTabIndex = tab.coerceIn(0, 7)) { listOf("Agent", "Research", "Model", "Memory", "Tools", "Learning", "Settings", "Logs").forEachIndexed { i, title -> Tab(tab == i, { tab = i }, text = { Text(title) }) } }
+                    TabRow(selectedTabIndex = tab.coerceIn(0, 7)) {
+                        listOf("Agent", "Research", "Model", "Memory", "Tools", "Learning", "Settings", "Logs").forEachIndexed { i, title ->
+                            Tab(tab == i, { tab = i }, text = { Text(title) })
+                        }
+                    }
                     Spacer(Modifier.height(12.dp))
                     when (tab) {
-                        0 -> AgentPage(task, { task = it }, answer, status, agent != null) { scope.launch { runCatching { agent!!.run(task).answer }.onSuccess { answer = it; status = "Task completed" }.onFailure { answer = "Error: ${it.message}"; status = "Task failed" } } }
-                        1 -> ResearchPage(task, { task = it }, answer, researchEnabled) { tab = 0; scope.launch { runCatching { agent!!.run("Research this topic thoroughly on the public web and produce a cited report: $task").answer }.onSuccess { answer = it; status = "Research completed" }.onFailure { answer = "Research error: ${it.message}" } } }
-                        2 -> ModelPage(modelPath, { modelPath = it }, status, { val chooser = JFileChooser().apply { dialogTitle = "Select Gemma 4 E4B .litertlm model" }; if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) { modelPath = chooser.selectedFile.absolutePath; scope.launch { runCatching { status = "Loading model..."; val r = DesktopModelRunner(modelPath); r.start(); runner?.close(); runner = r; rebuildAgent(); status = "Gemma 4 E4B ready" }.onFailure { status = "Load failed: ${it.message}" } } } }, { runner?.close(); runner = null; agent = null; status = "Model unloaded" })
+                        0 -> AgentPage(task, { task = it }, answer, status, agent != null) {
+                            scope.launch {
+                                runCatching { agent!!.run(task).answer }
+                                    .onSuccess { answer = it; status = "Task completed" }
+                                    .onFailure { answer = "Error: ${it.message}"; status = "Task failed" }
+                            }
+                        }
+                        1 -> ResearchPage(task, { task = it }, answer, researchEnabled) {
+                            tab = 0
+                            scope.launch {
+                                runCatching { agent!!.run("Research this topic thoroughly on the public web and produce a cited report: $task").answer }
+                                    .onSuccess { answer = it; status = "Research completed" }
+                                    .onFailure { answer = "Research error: ${it.message}" }
+                            }
+                        }
+                        2 -> ModelPage(modelPath, { modelPath = it }, status, {
+                            val chooser = JFileChooser().apply { dialogTitle = "Select Gemma 4 E4B .litertlm model" }
+                            if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
+                                modelPath = chooser.selectedFile.absolutePath
+                                scope.launch {
+                                    runCatching {
+                                        status = "Loading model..."
+                                        val r = DesktopModelRunner(modelPath)
+                                        r.start()
+                                        runner?.close()
+                                        runner = r
+                                        rebuildAgent()
+                                        status = "Gemma 4 E4B ready"
+                                    }.onFailure { status = "Load failed: ${it.message}" }
+                                }
+                            }
+                        }, {
+                            runner?.close()
+                            runner = null
+                            agent = null
+                            status = "Model unloaded"
+                        })
                         3 -> SimpleInfoPage("Memory", "Persistent experiences, facts and learned workflows are used by the agent across runs.")
                         4 -> SimpleInfoPage("Tools", "Calculator, date/time, filesystem, file search, HTTP, process execution and the Web Research plugin.")
                         5 -> LearningPage(learnFailures, { learnFailures = it; rebuildAgent() }, skillsEnabled, { skillsEnabled = it; rebuildAgent() }, reflectionEnabled, { reflectionEnabled = it; rebuildAgent() })
                         6 -> SettingsPage(mode, { mode = it; rebuildAgent() }, maxIterations, { maxIterations = it; rebuildAgent() }, memoryTopK, { memoryTopK = it; rebuildAgent() }, researchEnabled, { researchEnabled = it; rebuildAgent() })
-                        7 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) { Text("Metrics: ${metrics.snapshot()}"); Spacer(Modifier.height(8.dp)); Text(events.value.takeLast(80).joinToString("\n")) }
+                        7 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                            Text("Metrics: ${metrics.snapshot()}")
+                            Spacer(Modifier.height(8.dp))
+                            Text(events.value.takeLast(80).joinToString("\n"))
+                        }
                     }
                 }
             }
