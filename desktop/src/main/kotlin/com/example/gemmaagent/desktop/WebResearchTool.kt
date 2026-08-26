@@ -41,6 +41,7 @@ class WebResearchTool(
         val out = buildString {
             appendLine("WEB RESEARCH REPORT")
             appendLine("Query: $query")
+            appendLine("Search provider: ${report.searchProvider}")
             appendLine("Sources: ${report.sources.size}")
             appendLine("JavaScript renderer available: ${report.javascriptAvailable}")
             appendLine("Pages rendered with JavaScript: $rendered")
@@ -68,6 +69,7 @@ class WebResearchTool(
                 "crawlDepth" to crawlDepth.toString(),
                 "javascript" to javascript.toString(),
                 "javascriptRenderer" to rendered.toString(),
+                "searchProvider" to report.searchProvider,
                 "engine" to "chromium-dom-ranker",
             ),
         )
