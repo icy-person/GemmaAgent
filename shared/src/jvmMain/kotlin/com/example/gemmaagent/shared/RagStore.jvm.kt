@@ -7,7 +7,6 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
-import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import kotlin.math.log
 
@@ -99,15 +98,14 @@ class JvmRagStore(private val file: File) : RagStore {
     }
 
     private fun saveLocked() {
-        val target: Path = file.toPath().toAbsolutePath().normalize()
-        val parent: Path = target.parent ?: Path.of(".").toAbsolutePath().normalize()
+        val target = file.toPath().toAbsolutePath().normalize()
+        val parent = target.parent ?: file.absoluteFile.parentFile?.toPath()
+            ?: throw IllegalStateException("RAG index has no parent directory")
         Files.createDirectories(parent)
 
-        val tempName = target.fileName.toString() + ".part"
-        val temp: Path = parent.resolve(tempName)
+        val temp = file.toPath().resolveSibling(file.name + ".part")
         val state = RagState(docs.values.toList())
-        val payload = json.encodeToString(RagState.serializer(), state)
-
+        val payload = json.encodeToString<RagState>(state)
         Files.writeString(temp, payload, StandardCharsets.UTF_8)
 
         try {
