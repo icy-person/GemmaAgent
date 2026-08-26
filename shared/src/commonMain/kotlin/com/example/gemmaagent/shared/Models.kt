@@ -81,7 +81,9 @@ data class AgentConfig(
 @Serializable
 sealed class AgentEvent {
     @Serializable data class Started(val task: String, val atMs: Long) : AgentEvent()
+    @Serializable data class Stage(val name: String, val detail: String = "", val iteration: Int = 0) : AgentEvent()
     @Serializable data class Thinking(val iteration: Int) : AgentEvent()
+    @Serializable data class ModelOutput(val iteration: Int, val text: String) : AgentEvent()
     @Serializable data class ToolRequested(val iteration: Int, val call: ToolCall) : AgentEvent()
     @Serializable data class ToolCompleted(val iteration: Int, val call: ToolCall, val result: ToolResult) : AgentEvent()
     @Serializable data class Reflection(val text: String) : AgentEvent()
