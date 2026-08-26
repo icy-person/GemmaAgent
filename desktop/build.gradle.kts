@@ -6,6 +6,8 @@ plugins {
 dependencies {
     implementation(project(":shared"))
     implementation(compose.desktop.currentOs)
+    implementation(compose.material)
+    implementation("com.google.ai.edge.litertlm:litertlm-jvm:0.14.0")
 }
 
 compose.desktop {
