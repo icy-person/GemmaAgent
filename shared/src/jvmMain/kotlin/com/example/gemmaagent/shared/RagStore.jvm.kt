@@ -41,7 +41,10 @@ class JvmRagStore(private val file: File) : RagStore {
         mutex.withLock { docs.clear(); saveLocked() }
     }
 
-    override suspend fun countDocuments(): Long { ensureLoaded(); return mutex.withLock { docs.size.toLong() } }
+    override suspend fun countDocuments(): Long {
+        ensureLoaded()
+        return mutex.withLock { docs.size.toLong() }
+    }
 
     override suspend fun countChunks(): Long {
         ensureLoaded()
@@ -62,7 +65,9 @@ class JvmRagStore(private val file: File) : RagStore {
                 val matched = tokens.count { it in terms }
                 if (matched == 0) return@mapNotNull null
                 val tf = matched.toDouble() / tokens.size
-                val idf = tokens.sumOf { token -> log((chunks.size + 1.0) / documentFrequency.getValue(token)) } / tokens.size
+                val idf = tokens.sumOf { token ->
+                    log((chunks.size + 1.0) / documentFrequency.getValue(token))
+                } / tokens.size
                 val titleBoost = if (tokens.any { chunk.title.lowercase().contains(it) }) 0.15 else 0.0
                 RagHit(chunk, (tf * 0.75 + idf * 0.12 + titleBoost).coerceIn(0.0, 1.0 + titleBoost))
             }.sortedByDescending { it.score }.take(limit.coerceIn(1, 32))
@@ -70,10 +75,11 @@ class JvmRagStore(private val file: File) : RagStore {
     }
 
     private fun saveLocked() {
-        file.parentFile?.mkdirs()
         val parent = file.parentFile ?: file.absoluteFile.parentFile ?: File(".")
-        val tmp = File(parent, file.name + ".part")
+        parent.mkdirs()
+        val tmp = File(parent.absolutePath + File.separator + file.name + ".part")
         tmp.writeText(json.encodeToString(RagState.serializer(), RagState(docs.values.toList())))
+        if (file.exists()) file.delete()
         check(tmp.renameTo(file)) { "Unable to persist RAG index" }
     }
 }
