@@ -24,8 +24,8 @@ import androidx.compose.material.Slider
 import androidx.compose.material.Tab
 import androidx.compose.material.TabRow
 import androidx.compose.material.Text
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -88,7 +88,6 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
                 visionBackend = null,
                 audioBackend = null,
                 maxNumTokens = 8192,
-                maxNumImages = 0,
                 cacheDir = ":nocache",
             )
             val newEngine = Engine(config)
