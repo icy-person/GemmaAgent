@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Button
@@ -57,11 +58,9 @@ fun WorkbenchPage(registry: PluginRegistry) {
                 }
                 Text("Archive")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(archiveAction, { archiveAction = it }, Modifier.fillMaxWidth(), label = { Text("list / extract") })
-                    OutlinedTextField(outputDir, { outputDir = it }, Modifier.fillMaxWidth(), label = { Text("Output directory") })
-                    Button(onClick = { runTool("archive", buildJsonObject {
-                        put("action", JsonPrimitive(archiveAction)); put("path", JsonPrimitive(filePath)); put("output_dir", JsonPrimitive(outputDir))
-                    }.toString()) }) { Text("Open") }
+                    OutlinedTextField(archiveAction, { archiveAction = it }, Modifier.weight(1f), label = { Text("list / extract") })
+                    OutlinedTextField(outputDir, { outputDir = it }, Modifier.weight(1f), label = { Text("Output directory") })
+                    Button(onClick = { runTool("archive", buildJsonObject { put("action", JsonPrimitive(archiveAction)); put("path", JsonPrimitive(filePath)); put("output_dir", JsonPrimitive(outputDir)) }.toString()) }) { Text("Open") }
                 }
             }
         }
@@ -71,9 +70,7 @@ fun WorkbenchPage(registry: PluginRegistry) {
                 OutlinedTextField(gitAction, { gitAction = it }, Modifier.fillMaxWidth(), label = { Text("status / clone / pull / branches / checkout / log / diff") })
                 OutlinedTextField(gitRepo, { gitRepo = it }, Modifier.fillMaxWidth(), label = { Text("Repository URL for clone") })
                 OutlinedTextField(gitBranch, { gitBranch = it }, Modifier.fillMaxWidth(), label = { Text("Branch") })
-                Button(onClick = { runTool("git_workspace", buildJsonObject {
-                    put("action", JsonPrimitive(gitAction)); put("repo", JsonPrimitive(gitRepo)); put("branch", JsonPrimitive(gitBranch)); put("destination", JsonPrimitive("repo"))
-                }.toString()) }) { Text("Run Git action") }
+                Button(onClick = { runTool("git_workspace", buildJsonObject { put("action", JsonPrimitive(gitAction)); put("repo", JsonPrimitive(gitRepo)); put("branch", JsonPrimitive(gitBranch)); put("destination", JsonPrimitive("repo")) }.toString()) }) { Text("Run Git action") }
             }
         }
         Card(Modifier.fillMaxWidth()) {
@@ -81,16 +78,9 @@ fun WorkbenchPage(registry: PluginRegistry) {
                 Text("Build / Test / Lint")
                 OutlinedTextField(buildAction, { buildAction = it }, Modifier.fillMaxWidth(), label = { Text("build / test / lint / clean / check") })
                 OutlinedTextField(buildSystem, { buildSystem = it }, Modifier.fillMaxWidth(), label = { Text("auto / gradle / cargo / maven / npm / cmake") })
-                Button(onClick = { runTool("build", buildJsonObject {
-                    put("action", JsonPrimitive(buildAction)); put("system", JsonPrimitive(buildSystem))
-                }.toString()) }) { Text("Execute") }
+                Button(onClick = { runTool("build", buildJsonObject { put("action", JsonPrimitive(buildAction)); put("system", JsonPrimitive(buildSystem)) }.toString()) }) { Text("Execute") }
             }
         }
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp)) {
-                Text("Tool output")
-                Text(result.ifBlank { "No operation executed yet." })
-            }
-        }
+        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp)) { Text("Tool output"); Text(result.ifBlank { "No operation executed yet." }) } }
     }
 }
