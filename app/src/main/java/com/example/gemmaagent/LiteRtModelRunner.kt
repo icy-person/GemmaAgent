@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 class LiteRtModelRunner(
     private val modelPath: String,
     private val cachePath: String,
+    private val settings: ModelSettings,
     private val backend: Backend = Backend.CPU(),
 ) : ModelRunner, AutoCloseable {
     private var engine: Engine? = null
@@ -43,7 +44,11 @@ class LiteRtModelRunner(
     private fun createConversation(e: Engine, toolDefinitions: List<OpenApiTool>): Conversation =
         e.createConversation(
             ConversationConfig(
-                samplerConfig = SamplerConfig(topK = 64, topP = 0.95, temperature = 0.7),
+                samplerConfig = SamplerConfig(
+                    topK = settings.topK,
+                    topP = settings.topP.toDouble(),
+                    temperature = settings.temperature.toDouble(),
+                ),
                 automaticToolCalling = false,
                 tools = toolDefinitions.map { tool(it) },
             )
@@ -61,7 +66,6 @@ class LiteRtModelRunner(
         c.sendMessage(prompt).text
     }
 
-    @OptIn(kotlin.io.encoding.ExperimentalEncodingApi::class)
     override suspend fun generate(contents: List<ModelContent>): String = withContext(Dispatchers.Default) {
         check(started) { "Model is not started" }
         val c = conversation ?: error("Model conversation is unavailable")
