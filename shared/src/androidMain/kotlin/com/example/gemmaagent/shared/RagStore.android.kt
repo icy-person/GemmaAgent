@@ -1,0 +1,60 @@
+package com.example.gemmaagent.shared
+
+import android.content.Context
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import java.io.File
+import kotlin.math.log
+
+@Serializable
+private data class RagState(val documents: List<RagDocument> = emptyList())
+
+class AndroidRagStore(context: Context) : RagStore {
+    private val mutex = Mutex()
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val file = File(context.filesDir, "gemmaagent/rag/index.json")
+    private val docs = linkedMapOf<String, RagDocument>()
+    private val engine = RagEngine(this)
+    private var loaded = false
+
+    private suspend fun ensureLoaded() = mutex.withLock {
+        if (loaded) return@withLock
+        if (file.isFile) runCatching {
+            json.decodeFromString<RagState>(file.readText()).documents.forEach { docs[it.id] = it }
+        }
+        loaded = true
+    }
+
+    override suspend fun upsert(document: RagDocument) { ensureLoaded(); mutex.withLock { docs[document.id] = document; saveLocked() } }
+    override suspend fun delete(documentId: String) { ensureLoaded(); mutex.withLock { docs.remove(documentId); saveLocked() } }
+    override suspend fun clear() { ensureLoaded(); mutex.withLock { docs.clear(); saveLocked() } }
+    override suspend fun countDocuments(): Long { ensureLoaded(); return mutex.withLock { docs.size.toLong() } }
+    override suspend fun countChunks(): Long { ensureLoaded(); return mutex.withLock { docs.values.sumOf { engine.chunk(it).size }.toLong() } }
+
+    override suspend fun search(query: String, limit: Int): List<RagHit> {
+        ensureLoaded()
+        val tokens = ragTokens(query)
+        if (tokens.isEmpty()) return emptyList()
+        return mutex.withLock {
+            val chunks = docs.values.flatMap { engine.chunk(it) }
+            val df = tokens.associateWith { token -> chunks.count { ragTokens(it.text).contains(token) }.coerceAtLeast(1) }
+            chunks.mapNotNull { chunk ->
+                val terms = ragTokens(chunk.text).toSet()
+                val matched = tokens.count { it in terms }
+                if (matched == 0) return@mapNotNull null
+                val tf = matched.toDouble() / tokens.size
+                val idf = tokens.sumOf { token -> log((chunks.size + 1.0) / df.getValue(token)) } / tokens.size
+                RagHit(chunk, (tf * 0.82 + idf * 0.18).coerceIn(0.0, 1.0))
+            }.sortedByDescending { it.score }.take(limit.coerceIn(1, 32))
+        }
+    }
+
+    private fun saveLocked() {
+        file.parentFile?.mkdirs()
+        val tmp = File(file.parentFile, file.name + ".part")
+        tmp.writeText(json.encodeToString(RagState.serializer(), RagState(docs.values.toList())))
+        require(tmp.renameTo(file)) { "Unable to persist Android RAG index" }
+    }
+}
