@@ -6,7 +6,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import kotlin.math.max
 
 class AgentEngine(
@@ -42,24 +47,26 @@ class AgentEngine(
         var iterationCount = 0
 
         var prompt = buildPrompt(task, project, memories, facts, skills, history, "")
+        val iterationLimit = config.maxIterations.coerceIn(1, 200)
 
-        for (iteration in 1..config.maxIterations.coerceIn(1, 200)) {
+        for (iteration in 1..iterationLimit) {
             iterationCount = iteration
             observer.onEvent(AgentEvent.Thinking(iteration))
-            val response = runCatching { model.generate(prompt) }
+            val rawResponse = runCatching { model.generate(prompt) }
                 .getOrElse {
                     observer.onEvent(AgentEvent.Failed(it.message ?: "Model error"))
                     break
                 }
-            history += "MODEL[$iteration]: $response"
+            val response = stripThinking(rawResponse)
+            history += "MODEL[$iteration]: ${response.take(20_000)}"
 
-            val action = parseAction(response)
+            val action = parseAction(rawResponse)
             if (action == null) {
                 finalAnswer = response.trim()
                 success = finalAnswer.isNotBlank()
                 if (config.reflectionEnabled && success) {
                     val reflection = runCatching {
-                        model.generate(buildReflectionPrompt(task, finalAnswer, toolHistory))
+                        stripThinking(model.generate(buildReflectionPrompt(task, finalAnswer, toolHistory)))
                     }.getOrDefault("")
                     if (reflection.isNotBlank()) observer.onEvent(AgentEvent.Reflection(reflection))
                     if (!reflection.contains("RETRY", ignoreCase = true)) break
@@ -100,7 +107,7 @@ class AgentEngine(
 
             if (!result.ok && config.reflectionEnabled) {
                 val reflection = runCatching {
-                    model.generate(buildReflectionPrompt(task, "Tool ${action.name} failed: ${result.content}", toolHistory))
+                    stripThinking(model.generate(buildReflectionPrompt(task, "Tool ${action.name} failed: ${result.content}", toolHistory)))
                 }.getOrDefault("")
                 if (reflection.isNotBlank()) observer.onEvent(AgentEvent.Reflection(reflection))
             }
@@ -157,8 +164,8 @@ class AgentEngine(
             You are GemmaAgent, a local autonomous agent.
             Follow this loop: understand → plan → act with tools → inspect observations → verify → answer.
             Never invent tool results. Prefer small, reversible actions. If a requested tool is unavailable, explain it.
-            Tool call format must be exactly JSON: {"tool":"tool_name","arguments":{...}}
-            A normal response without a tool JSON means the task is complete.
+            Tool call format may be either the native Gemma 4 format `<|tool_call>call:tool_name{...}<tool_call|>` or JSON `{"tool":"tool_name","arguments":{...}}`.
+            A normal response without a tool call means the task is complete.
             MODE: ${config.mode}
             PROJECT: ${project ?: "none"}
             TASK:
@@ -193,15 +200,111 @@ class AgentEngine(
         "- success=${it.success}, score=${"%.2f".format(it.score)}, task=${it.task.take(180)}, plan=${it.plan.take(240)}, result=${it.result.take(240)}"
     }
 
-    private fun trimContext(text: String): String = if (text.length <= config.maxContextChars.coerceAtLeast(2_000)) text else text.take(config.maxContextChars.coerceAtLeast(2_000)) + "\n[context trimmed]"
+    private fun trimContext(text: String): String {
+        val limit = config.maxContextChars.coerceIn(2_000, 500_000)
+        return if (text.length <= limit) text else text.take(limit) + "\n[context trimmed]"
+    }
 
     private fun parseAction(text: String): ToolCall? {
+        parseNativeGemmaToolCall(text)?.let { return it }
+        return parseJsonToolCall(text)
+    }
+
+    private fun parseJsonToolCall(text: String): ToolCall? {
         val toolIndex = text.lastIndexOf("\"tool\"")
         if (toolIndex < 0) return null
         val start = text.lastIndexOf('{', toolIndex)
+        val end = findBalancedObjectEnd(text, start)
+        if (start < 0 || end < 0) return null
+        return runCatching { json.decodeFromString<ToolEnvelope>(text.substring(start, end + 1)).asCall() }.getOrNull()
+    }
+
+    private fun parseNativeGemmaToolCall(text: String): ToolCall? {
+        val marker = "<|tool_call>call:"
+        val start = text.lastIndexOf(marker)
         if (start < 0) return null
+        val nameStart = start + marker.length
+        val brace = text.indexOf('{', nameStart)
+        val endMarker = text.indexOf("<tool_call|>", nameStart)
+        if (brace <= nameStart || endMarker < 0) return null
+        val name = text.substring(nameStart, brace).trim()
+        if (name.isBlank()) return null
+        val body = text.substring(brace + 1, endMarker).trim().removeSuffix("}").trim()
+        return ToolCall(name, nativeArgumentsToJson(body))
+    }
+
+    private fun nativeArgumentsToJson(body: String): String {
+        if (body.isBlank()) return "{}"
+        val strict = runCatching { json.parseToJsonElement("{$body}").jsonObject }.getOrNull()
+        if (strict != null) return strict.toString()
+
+        val result = buildJsonObject {
+            splitTopLevel(body, ',').forEach { pair ->
+                val colon = indexOfTopLevelColon(pair)
+                if (colon <= 0) return@forEach
+                val key = pair.substring(0, colon).trim().trim('"', '\'')
+                if (key.isBlank()) return@forEach
+                val raw = pair.substring(colon + 1).trim()
+                put(key, parseNativeValue(raw))
+            }
+        }
+        return result.toString()
+    }
+
+    private fun parseNativeValue(raw: String): JsonElement {
+        if (raw.isBlank()) return JsonPrimitive("")
+        return runCatching { json.parseToJsonElement(raw) }.getOrElse {
+            val unquoted = raw.removeSurrounding("\"", "\"").removeSurrounding("'", "'")
+            when (unquoted.lowercase()) {
+                "true" -> JsonPrimitive(true)
+                "false" -> JsonPrimitive(false)
+                "null" -> JsonPrimitive("")
+                else -> unquoted.toDoubleOrNull()?.let { JsonPrimitive(it) } ?: JsonPrimitive(unquoted)
+            }
+        }
+    }
+
+    private fun splitTopLevel(text: String, delimiter: Char): List<String> {
+        val parts = mutableListOf<String>()
+        var start = 0
         var depth = 0
-        var end = -1
+        var quoted = false
+        var escaped = false
+        text.forEachIndexed { index, c ->
+            if (escaped) { escaped = false; return@forEachIndexed }
+            if (c == '\\' && quoted) { escaped = true; return@forEachIndexed }
+            if (c == '"' || c == '\'') quoted = !quoted
+            if (!quoted) {
+                when (c) { '{', '[', '(' -> depth++; '}', ']', ')' -> depth-- }
+                if (c == delimiter && depth == 0) {
+                    parts += text.substring(start, index)
+                    start = index + 1
+                }
+            }
+        }
+        parts += text.substring(start)
+        return parts
+    }
+
+    private fun indexOfTopLevelColon(text: String): Int {
+        var depth = 0
+        var quoted = false
+        var escaped = false
+        text.forEachIndexed { index, c ->
+            if (escaped) { escaped = false; return@forEachIndexed }
+            if (c == '\\' && quoted) { escaped = true; return@forEachIndexed }
+            if (c == '"' || c == '\'') quoted = !quoted
+            if (!quoted) {
+                when (c) { '{', '[', '(' -> depth++; '}', ']', ')' -> depth-- }
+                if (c == ':' && depth == 0) return index
+            }
+        }
+        return -1
+    }
+
+    private fun findBalancedObjectEnd(text: String, start: Int): Int {
+        if (start < 0) return -1
+        var depth = 0
         var quoted = false
         var escaped = false
         for (i in start until text.length) {
@@ -213,12 +316,18 @@ class AgentEngine(
                 if (c == '{') depth++
                 if (c == '}') {
                     depth--
-                    if (depth == 0) { end = i; break }
+                    if (depth == 0) return i
                 }
             }
         }
-        if (end < 0) return null
-        return runCatching { json.decodeFromString<ToolEnvelope>(text.substring(start, end + 1)).asCall() }.getOrNull()
+        return -1
+    }
+
+    private fun stripThinking(text: String): String {
+        return text
+            .replace(Regex("(?s)<\\|channel>thought\\n.*?<channel\\|>"), "")
+            .replace(Regex("(?s)<\\|think\\|>.*?(?:<channel\\|>|<\\|turn\\|>)"), "")
+            .trim()
     }
 
     private fun scoreRun(success: Boolean, actions: List<String>, iterations: Int): Double {
