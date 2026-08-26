@@ -36,7 +36,7 @@ class WebResearchTool(
             val args = Json.parseToJsonElement(argumentsJson).jsonObject
             val query = args["query"]?.jsonPrimitive?.content?.trim().orEmpty()
             require(query.isNotBlank()) { "query is required" }
-            val requested = args["max_results"]?.jsonPrimitive?.intOrNull ?: maxResults
+            val requested = args["max_results"]?.jsonPrimitive?.content?.toIntOrNull() ?: maxResults
             val limit = requested.coerceIn(1, maxResults)
             val links = search(query).take(limit)
             val gathered = links.mapNotNull { result ->
