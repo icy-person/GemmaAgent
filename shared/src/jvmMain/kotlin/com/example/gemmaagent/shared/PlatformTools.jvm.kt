@@ -75,12 +75,24 @@ private class JvmProcessTool : AgentTool {
         val o = json.parseToJsonElement(argumentsJson).jsonObject
         val command = o["command"]?.jsonPrimitive?.content ?: error("command required")
         val timeoutSeconds = o["timeout_seconds"]?.jsonPrimitive?.content?.toLongOrNull()?.coerceIn(1, 300) ?: 60L
-        val p = ProcessBuilder("sh", "-lc", command).redirectErrorStream(true).start()
-        val output = p.inputStream.bufferedReader().use { reader ->
-            if (p.waitFor(timeoutSeconds, TimeUnit.SECONDS)) reader.readText().take(50_000)
-            else { p.destroyForcibly(); "process timeout after ${timeoutSeconds}s\n" + reader.readText().take(50_000) }
+        val temp = File.createTempFile("gemma-agent-process-", ".log")
+        try {
+            val process = ProcessBuilder("sh", "-lc", command)
+                .redirectErrorStream(true)
+                .redirectOutput(temp)
+                .start()
+            val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            if (!finished) process.destroyForcibly()
+            if (!finished) process.waitFor(2, TimeUnit.SECONDS)
+            val code = if (process.isAlive) -1 else process.exitValue()
+            val output = temp.readText().take(50_000)
+            ToolResult(
+                code == 0 && finished,
+                "exit=$code\n$output",
+                metadata = mapOf("exitCode" to code.toString(), "timedOut" to (!finished).toString()),
+            )
+        } finally {
+            runCatching { temp.delete() }
         }
-        val code = if (p.isAlive) -1 else p.exitValue()
-        ToolResult(code == 0, "exit=$code\n$output", metadata = mapOf("exitCode" to code.toString()))
     }.getOrElse { ToolResult(false, "process error: ${it.message}") }
 }
