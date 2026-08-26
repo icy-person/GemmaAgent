@@ -46,7 +46,6 @@ import com.example.gemmaagent.shared.CalculatorTool
 import com.example.gemmaagent.shared.DateTimeTool
 import com.example.gemmaagent.shared.EchoTool
 import com.example.gemmaagent.shared.JvmMemoryStore
-import com.example.gemmaagent.shared.ModelBenchmark
 import com.example.gemmaagent.shared.PluginRegistry
 import com.example.gemmaagent.shared.platformTools
 import com.google.ai.edge.litertlm.Backend
@@ -56,12 +55,13 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import java.io.File
 import javax.swing.JFileChooser
 
 private enum class ModelState { IDLE, LOADING, READY, FAILED, CLOSED }
+private data class ModelBenchmark(val totalMs: Long, val decodeMs: Long, val tokens: Int, val tokensPerSecond: Double)
 
 private class DesktopModelRunner(private val path: String) : com.example.gemmaagent.shared.ModelRunner, AutoCloseable {
     private var engine: Engine? = null
@@ -102,9 +102,11 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
 
     suspend fun benchmark(prompt: String = "Reply with exactly: BENCHMARK_OK"): ModelBenchmark = withContext(Dispatchers.Default) {
         check(state == ModelState.READY) { "Model is not ready" }
-        val started = System.nanoTime(); val result = generate(prompt); val totalMs = (System.nanoTime() - started) / 1_000_000L
+        val started = System.nanoTime()
+        val result = generate(prompt)
+        val totalMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
         val tokens = result.trim().split(Regex("\\s+")).count { it.isNotEmpty() }.coerceAtLeast(1)
-        ModelBenchmark(totalMs, totalMs, tokens, tokens * 1000.0 / totalMs.coerceAtLeast(1))
+        ModelBenchmark(totalMs, totalMs, tokens, tokens * 1000.0 / totalMs)
     }
 
     override fun close() { runCatching { conversation?.close() }; runCatching { engine?.close() }; conversation = null; engine = null; state = ModelState.CLOSED }
