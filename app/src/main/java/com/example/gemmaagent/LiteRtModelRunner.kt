@@ -22,6 +22,7 @@ class LiteRtModelRunner(
 ) : ModelRunner, AutoCloseable {
     private var engine: Engine? = null
     private var conversation: Conversation? = null
+    private var started = false
 
     suspend fun start(toolDefinitions: List<OpenApiTool>) = withContext(Dispatchers.IO) {
         val e = Engine(
@@ -35,23 +36,35 @@ class LiteRtModelRunner(
         )
         e.initialize()
         engine = e
-        conversation = e.createConversation(
+        conversation = createConversation(e, toolDefinitions)
+        started = true
+    }
+
+    private fun createConversation(e: Engine, toolDefinitions: List<OpenApiTool>): Conversation =
+        e.createConversation(
             ConversationConfig(
                 samplerConfig = SamplerConfig(topK = 64, topP = 0.95, temperature = 0.7),
                 automaticToolCalling = false,
                 tools = toolDefinitions.map { tool(it) },
             )
         )
+
+    override suspend fun reset() = withContext(Dispatchers.IO) {
+        val e = engine ?: return@withContext
+        conversation?.close()
+        conversation = createConversation(e, emptyList())
     }
 
     override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
-        val c = conversation ?: error("Model is not started")
+        check(started) { "Model is not started" }
+        val c = conversation ?: error("Model conversation is unavailable")
         c.sendMessage(prompt).text
     }
 
     @OptIn(kotlin.io.encoding.ExperimentalEncodingApi::class)
     override suspend fun generate(contents: List<ModelContent>): String = withContext(Dispatchers.Default) {
-        val c = conversation ?: error("Model is not started")
+        check(started) { "Model is not started" }
+        val c = conversation ?: error("Model conversation is unavailable")
         val mapped = contents.map {
             when (it) {
                 is ModelContent.Text -> Content.Text(it.text)
@@ -67,5 +80,6 @@ class LiteRtModelRunner(
     override fun close() {
         conversation?.close(); conversation = null
         engine?.close(); engine = null
+        started = false
     }
 }
