@@ -96,6 +96,14 @@ data class AgentRun(
     val experienceId: String,
 )
 
+sealed interface ModelContent {
+    data class Text(val text: String) : ModelContent
+    data class ImageFile(val absolutePath: String) : ModelContent
+    data class AudioFile(val absolutePath: String) : ModelContent
+    data class ImageBytes(val bytes: ByteArray) : ModelContent
+    data class AudioBytes(val bytes: ByteArray) : ModelContent
+}
+
 interface MemoryStore {
     suspend fun search(query: String, limit: Int = 5): List<Experience>
     suspend fun store(experience: Experience)
@@ -108,6 +116,7 @@ interface MemoryStore {
 
 interface ModelRunner {
     suspend fun generate(prompt: String): String
+    suspend fun generate(contents: List<ModelContent>): String = error("Multimodal input is not supported by this model runner")
 }
 
 interface AgentTool {
