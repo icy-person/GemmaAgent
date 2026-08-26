@@ -8,7 +8,7 @@ import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import kotlin.math.log
+import kotlin.math.ln
 
 @Serializable
 private data class RagState(val documents: List<RagDocument> = emptyList())
@@ -24,7 +24,7 @@ class JvmRagStore(private val file: File) : RagStore {
         if (loaded) return@withLock
         if (file.isFile) runCatching {
             val text = Files.readString(file.toPath(), StandardCharsets.UTF_8)
-            val state = json.decodeFromString(RagState.serializer(), text)
+            val state = json.decodeFromString<RagState>(text)
             state.documents.forEach { docs[it.id] = it }
         }
         loaded = true
@@ -83,7 +83,7 @@ class JvmRagStore(private val file: File) : RagStore {
 
                 val tf = matched.toDouble() / tokens.size
                 val idf = tokens.sumOf { token ->
-                    log((chunks.size + 1.0) / documentFrequency.getValue(token))
+                    ln((chunks.size + 1.0) / documentFrequency.getValue(token))
                 } / tokens.size
                 val titleBoost = if (tokens.any { chunk.title.lowercase().contains(it) }) 0.15 else 0.0
 
@@ -99,13 +99,14 @@ class JvmRagStore(private val file: File) : RagStore {
 
     private fun saveLocked() {
         val target = file.toPath().toAbsolutePath().normalize()
-        val parent = target.parent ?: file.absoluteFile.parentFile?.toPath()
+        val parent = target.parent
+            ?: file.absoluteFile.parentFile?.toPath()
             ?: throw IllegalStateException("RAG index has no parent directory")
         Files.createDirectories(parent)
 
-        val temp = file.toPath().resolveSibling(file.name + ".part")
+        val temp = target.resolveSibling(target.fileName.toString() + ".part")
         val state = RagState(docs.values.toList())
-        val payload = json.encodeToString<RagState>(state)
+        val payload = json.encodeToString(state)
         Files.writeString(temp, payload, StandardCharsets.UTF_8)
 
         try {
