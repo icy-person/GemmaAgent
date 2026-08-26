@@ -1,0 +1,49 @@
+name: Build GemmaAgent Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: APK build type
+        required: true
+        default: debug
+        type: choice
+        options: [debug, release]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;29.0.13113456"
+      - name: Build Rust Android libraries
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+          ./rust-core/build_android.sh
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            ./gradlew :app:assembleRelease --no-daemon --stacktrace
+            APK=app/build/outputs/apk/release/app-release.apk
+          else
+            ./gradlew :app:assembleDebug --no-daemon --stacktrace
+            APK=app/build/outputs/apk/debug/app-debug.apk
+          fi
+          test -s "$APK"
+          mkdir -p dist
+          cp "$APK" dist/GemmaAgent-${{ inputs.build_type }}.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GemmaAgent-${{ inputs.build_type }}-apk
+          path: dist/GemmaAgent-${{ inputs.build_type }}.apk
+          if-no-files-found: error
