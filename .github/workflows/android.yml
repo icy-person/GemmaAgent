@@ -14,6 +14,7 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
       - name: Install NDK and Rust targets
         run: |
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.13113456"
@@ -30,7 +31,7 @@ jobs:
           test -f app/src/main/jniLibs/arm64-v8a/libgemma_agent_core.so
           test -f app/src/main/jniLibs/x86_64/libgemma_agent_core.so
       - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon
+        run: gradle :app:assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: GemmaAgent-debug-apk
@@ -44,8 +45,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
       - name: Build desktop distribution
-        run: ./gradlew :desktop:packageDistributionForCurrentOS --no-daemon
+        run: gradle :desktop:packageDistributionForCurrentOS --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: GemmaAgent-desktop
