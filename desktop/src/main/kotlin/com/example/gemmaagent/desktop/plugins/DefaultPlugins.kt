@@ -14,4 +14,5 @@ suspend fun installDefaultPlugins(registry: PluginRegistry, dataDir: File) {
     registry.install(DevOpsPlugin(workspace))
     registry.install(AdvancedPlugins(workspace, dataDir))
     registry.install(RuntimeSupportPlugin(dataDir))
+    registry.install(DocumentAndDataPlugin(workspace))
 }
