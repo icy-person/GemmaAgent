@@ -26,7 +26,7 @@ import com.example.gemmaagent.shared.DateTimeTool
 import com.example.gemmaagent.shared.EchoTool
 import com.example.gemmaagent.shared.JvmMemoryStore
 import com.example.gemmaagent.shared.ModelRunner
-import com.example.gemmaagent.shared.PlatformTools
+import com.example.gemmaagent.shared.platformTools
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Contents
@@ -68,11 +68,12 @@ fun main() = application {
                     Button(onClick = {
                         scope.launch {
                             runCatching {
+                                require(path.endsWith(".litertlm", true)) { "Model path must point to a .litertlm file" }
                                 status = "Loading model..."
                                 val r = DesktopModelRunner(path)
                                 r.start()
                                 runner?.close(); runner = r
-                                val tools = listOf(CalculatorTool(), DateTimeTool(), EchoTool()) + PlatformTools(path = File(path).parent ?: ".")
+                                val tools = listOf(CalculatorTool(), DateTimeTool(), EchoTool()) + platformTools(File(path).parent ?: ".")
                                 agent = AgentEngine(r, memory, tools, AgentConfig())
                                 status = "Model ready"
                             }.onFailure { status = "Load failed: ${it.message}" }
