@@ -16,7 +16,7 @@ dependencies {
 
 compose.desktop {
     application {
-        mainClass = "com.example.gemmaagent.desktop.DesktopAppKt"
+        mainClass = "com.example.gemmaagent.desktop.MainKt"
         nativeDistributions {
             packageName = "GemmaAgent"
             packageVersion = "0.1.0"
