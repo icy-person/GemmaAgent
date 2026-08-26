@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Button
@@ -58,8 +57,8 @@ fun WorkbenchPage(registry: PluginRegistry) {
                 }
                 Text("Archive")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(archiveAction, { archiveAction = it }, Modifier.weight(1f), label = { Text("list / extract") })
-                    OutlinedTextField(outputDir, { outputDir = it }, Modifier.weight(1f), label = { Text("Output directory") })
+                    OutlinedTextField(archiveAction, { archiveAction = it }, Modifier.fillMaxWidth(), label = { Text("list / extract") })
+                    OutlinedTextField(outputDir, { outputDir = it }, Modifier.fillMaxWidth(), label = { Text("Output directory") })
                     Button(onClick = { runTool("archive", buildJsonObject {
                         put("action", JsonPrimitive(archiveAction)); put("path", JsonPrimitive(filePath)); put("output_dir", JsonPrimitive(outputDir))
                     }.toString()) }) { Text("Open") }
