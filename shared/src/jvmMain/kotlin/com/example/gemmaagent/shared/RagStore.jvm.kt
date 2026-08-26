@@ -71,7 +71,8 @@ class JvmRagStore(private val file: File) : RagStore {
 
     private fun saveLocked() {
         file.parentFile?.mkdirs()
-        val tmp = File(file.parentFile ?: file.absoluteFile.parentFile!!, file.name + ".part")
+        val parent = file.parentFile ?: file.absoluteFile.parentFile ?: File(".")
+        val tmp = File(parent, file.name + ".part")
         tmp.writeText(json.encodeToString(RagState.serializer(), RagState(docs.values.toList())))
         check(tmp.renameTo(file)) { "Unable to persist RAG index" }
     }
