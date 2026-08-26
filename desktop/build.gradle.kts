@@ -10,7 +10,7 @@ dependencies {
     implementation(compose.desktop.currentOs)
     implementation(compose.material)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
-    implementation("com.google.ai.edge.litertlm:litertlm-jvm:0.14.0")
+    implementation("com.google.ai.edge.litertlm:litertlm-jvm:0.16.0")
     implementation("org.jsoup:jsoup:1.18.3")
 }
 
