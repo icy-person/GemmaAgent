@@ -57,6 +57,7 @@ import com.google.ai.edge.litertlm.EngineConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.awt.EventQueue
 import java.io.File
 import javax.swing.JFileChooser
 
@@ -77,11 +78,6 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
             require(modelFile.canRead()) { "Model file is not readable: $path" }
             require(modelFile.length() > 0L) { "Model file is empty: $path" }
             require(path.endsWith(".litertlm", ignoreCase = true)) { "Expected a .litertlm model" }
-
-            // Conservative CPU configuration for Gemma 4 E4B on desktop.
-            // 8K avoids the large default context allocation while remaining useful for an agent.
-            // Disable the XNNPACK weight cache while validating runtime stability; this also
-            // prevents stale .xnnpack_cache files from a different LiteRT-LM version from being reused.
             val config = EngineConfig(
                 modelPath = modelFile.absolutePath,
                 backend = Backend.CPU(threadCount = 2),
@@ -132,6 +128,18 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
     }
 }
 
+private fun formatLiveEvent(event: AgentEvent): String = when (event) {
+    is AgentEvent.Started -> "▶ شروع کار: ${event.task.take(120)}"
+    is AgentEvent.Stage -> "• ${event.name}: ${event.detail.take(180)}"
+    is AgentEvent.Thinking -> "🧠 در حال پردازش مرحله ${event.iteration}"
+    is AgentEvent.ModelOutput -> "◌ خروجی مدل دریافت شد (${event.text.length} chars)"
+    is AgentEvent.ToolRequested -> "🛠 اجرای ابزار: ${event.call.name} ${event.call.argumentsJson.take(180)}"
+    is AgentEvent.ToolCompleted -> "✓ ابزار ${event.call.name}: ${if (event.result.ok) "موفق" else "خطا"} (${event.result.durationMs} ms) — ${event.result.content.take(220)}"
+    is AgentEvent.Reflection -> "↻ بررسی نتیجه: ${event.text.take(220)}"
+    is AgentEvent.Finished -> "■ ${if (event.success) "کار تمام شد" else "کار متوقف شد"}"
+    is AgentEvent.Failed -> "✕ خطا: ${event.message.take(220)}"
+}
+
 fun main() = application {
     Window(onCloseRequest = ::exitApplication, title = "GemmaAgent Desktop") {
         var tab by remember { mutableStateOf(0) }
@@ -152,12 +160,27 @@ fun main() = application {
         var reflectionEnabled by remember { mutableStateOf(true) }
         var learnFailures by remember { mutableStateOf(true) }
         var researchEnabled by remember { mutableStateOf(true) }
+        var running by remember { mutableStateOf(false) }
         val events = remember { mutableStateOf(listOf<String>()) }
         val observer = remember {
             object : AgentObserver {
                 override fun onEvent(event: AgentEvent) {
                     metrics.onEvent(event)
-                    events.value = (events.value + event.toString()).takeLast(120)
+                    val line = formatLiveEvent(event)
+                    EventQueue.invokeLater {
+                        events.value = (events.value + line).takeLast(160)
+                        when (event) {
+                            is AgentEvent.Started -> status = "Agent started"
+                            is AgentEvent.Thinking -> status = "Thinking — iteration ${event.iteration}"
+                            is AgentEvent.ToolRequested -> status = "Running ${event.call.name}"
+                            is AgentEvent.ToolCompleted -> status = "Tool ${event.call.name}: ${if (event.result.ok) "done" else "failed"}"
+                            is AgentEvent.Reflection -> status = "Verifying result"
+                            is AgentEvent.Finished -> status = if (event.success) "Task completed" else "Task stopped"
+                            is AgentEvent.Failed -> status = "Task failed"
+                            is AgentEvent.Stage -> status = event.name
+                            is AgentEvent.ModelOutput -> status = "Model responded"
+                        }
+                    }
                 }
             }
         }
@@ -212,23 +235,38 @@ fun main() = application {
                     }
                     Spacer(Modifier.height(12.dp))
                     when (tab) {
-                        0 -> AgentPage(task, { task = it }, answer, status, agent != null) {
+                        0 -> AgentPage(
+                            task = task,
+                            onTask = { task = it },
+                            answer = answer,
+                            status = status,
+                            enabled = agent != null && !running,
+                            running = running,
+                            events = events.value,
+                        ) {
+                            running = true
+                            events.value = (events.value + "▶ اجرای Task شروع شد").takeLast(160)
                             scope.launch {
                                 runCatching { agent!!.run(task).answer }
-                                    .onSuccess { answer = it; status = "Task completed" }
-                                    .onFailure { answer = "Error: ${it.message}"; status = "Task failed" }
+                                    .onSuccess { answer = it }
+                                    .onFailure { answer = "Error: ${it.message}" }
+                                running = false
                             }
                         }
                         1 -> ResearchPage(task, { task = it }, answer, researchEnabled) {
                             tab = 0
-                            scope.launch {
-                                runCatching {
-                                    agent!!.run(
-                                        "Research this topic thoroughly on the public web and produce a cited report: $task"
-                                    ).answer
+                            if (!running) {
+                                running = true
+                                scope.launch {
+                                    runCatching {
+                                        agent!!.run(
+                                            "Research this topic thoroughly on the public web and produce a cited report: $task"
+                                        ).answer
+                                    }
+                                        .onSuccess { answer = it }
+                                        .onFailure { answer = "Research error: ${it.message}" }
+                                    running = false
                                 }
-                                    .onSuccess { answer = it; status = "Research completed" }
-                                    .onFailure { answer = "Research error: ${it.message}" }
                             }
                         }
                         2 -> ModelPage(modelPath, { modelPath = it }, status, {
@@ -264,7 +302,7 @@ fun main() = application {
                         7 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                             Text("Metrics: ${metrics.snapshot()}")
                             Spacer(Modifier.height(8.dp))
-                            Text(events.value.takeLast(80).joinToString("\n"))
+                            Text(events.value.takeLast(120).joinToString("\n"))
                         }
                     }
                 }
@@ -273,7 +311,42 @@ fun main() = application {
     }
 }
 
-@Composable private fun AgentPage(task: String, onTask: (String) -> Unit, answer: String, status: String, enabled: Boolean, run: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Agent", style = MaterialTheme.typography.h5); Text(status); OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Task") }, minLines = 5); Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text("Run Agent") }; Card(Modifier.fillMaxWidth()) { Text(answer, Modifier.padding(14.dp).verticalScroll(rememberScrollState())) } } }
+@Composable private fun AgentPage(
+    task: String,
+    onTask: (String) -> Unit,
+    answer: String,
+    status: String,
+    enabled: Boolean,
+    running: Boolean,
+    events: List<String>,
+    run: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("Agent", style = MaterialTheme.typography.h5)
+            Text(if (running) "● LIVE" else "○ Idle")
+        }
+        Text(status)
+        OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Task") }, minLines = 5)
+        Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text(if (running) "Running…" else "Run Agent") }
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Live activity", style = MaterialTheme.typography.h6)
+                Text(
+                    events.takeLast(40).joinToString("\n").ifBlank { "Waiting for an agent run…" },
+                    Modifier.fillMaxWidth().height(220.dp).verticalScroll(rememberScrollState()),
+                )
+            }
+        }
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp)) {
+                Text("Final answer", style = MaterialTheme.typography.h6)
+                Text(answer.ifBlank { "No final answer yet." })
+            }
+        }
+    }
+}
+
 @Composable private fun ResearchPage(task: String, onTask: (String) -> Unit, answer: String, enabled: Boolean, run: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Web Research", style = MaterialTheme.typography.h5); Text("Search, render JavaScript pages, extract relevant evidence and cite sources."); OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Research topic") }, minLines = 5); Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text("Research") }; Card(Modifier.fillMaxSize()) { Text(answer, Modifier.padding(14.dp).verticalScroll(rememberScrollState())) } } }
 @Composable private fun ModelPage(path: String, onPath: (String) -> Unit, status: String, choose: () -> Unit, unload: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Model", style = MaterialTheme.typography.h5); Text(status); OutlinedTextField(path, onPath, Modifier.fillMaxWidth(), label = { Text(".litertlm model path") }); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = choose) { Text("Import / Load") }; OutlinedButton(onClick = unload) { Text("Unload") } } } }
 @Composable private fun LearningPage(learnFailures: Boolean, onFailures: (Boolean) -> Unit, skills: Boolean, onSkills: (Boolean) -> Unit, reflection: Boolean, onReflection: (Boolean) -> Unit) { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Learning", style = MaterialTheme.typography.h5); CheckRow("Learn from failed runs", learnFailures, onFailures); CheckRow("Learn reusable skills", skills, onSkills); CheckRow("Self-reflection / verification", reflection, onReflection); Text("Learning updates external memory and skills; Gemma weights remain unchanged.") } }
