@@ -5,6 +5,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import kotlin.math.log
 
 @Serializable
@@ -20,7 +24,7 @@ class JvmRagStore(private val file: File) : RagStore {
     private suspend fun ensureLoaded() = mutex.withLock {
         if (loaded) return@withLock
         if (file.isFile) runCatching {
-            val state = json.decodeFromString<RagState>(file.readText())
+            val state = json.decodeFromString<RagState>(file.readText(StandardCharsets.UTF_8))
             state.documents.forEach { docs[it.id] = it }
         }
         loaded = true
@@ -57,6 +61,7 @@ class JvmRagStore(private val file: File) : RagStore {
         if (tokens.isEmpty()) return emptyList()
         return mutex.withLock {
             val chunks = docs.values.flatMap { engine.chunk(it) }
+            if (chunks.isEmpty()) return@withLock emptyList()
             val documentFrequency = tokens.associateWith { token ->
                 chunks.count { ragTokens(it.text).contains(token) }.coerceAtLeast(1)
             }
@@ -75,11 +80,16 @@ class JvmRagStore(private val file: File) : RagStore {
     }
 
     private fun saveLocked() {
-        val parent = file.parentFile ?: file.absoluteFile.parentFile ?: File(".")
-        parent.mkdirs()
-        val tmp = File(parent.absolutePath + File.separator + file.name + ".part")
-        tmp.writeText(json.encodeToString(RagState.serializer(), RagState(docs.values.toList())))
-        if (file.exists()) file.delete()
-        check(tmp.renameTo(file)) { "Unable to persist RAG index" }
+        val target = file.toPath().toAbsolutePath().normalize()
+        val parent = target.parent ?: Path.of(".").toAbsolutePath().normalize()
+        Files.createDirectories(parent)
+        val temp = parent.resolve(target.fileName.toString() + ".part")
+        val payload = json.encodeToString(RagState(docs.values.toList()))
+        Files.writeString(temp, payload, StandardCharsets.UTF_8)
+        runCatching {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        }.getOrElse {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 }
