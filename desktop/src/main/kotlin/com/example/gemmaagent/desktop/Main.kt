@@ -22,10 +22,7 @@ import androidx.compose.material.Card
 import androidx.compose.material.Divider
 import androidx.compose.material.IconButton
 import androidx.compose.material.MaterialTheme
-import androidx.compose.material.OutlinedButton
 import androidx.compose.material.OutlinedTextField
-import androidx.compose.material.RadioButton
-import androidx.compose.material.Slider
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -306,7 +303,7 @@ private fun ChatHeader(status: String, loaded: Boolean, onActivity: () -> Unit, 
 
 @Composable
 private fun ChatTimeline(messages: List<ChatMessage>) {
-    Box(Modifier.weight(1f).fillMaxWidth()) {
+    Box(Modifier.fillMaxHeight().fillMaxWidth()) {
         if (messages.isEmpty()) {
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text("What can I help you with?", style = MaterialTheme.typography.h5)
@@ -326,7 +323,7 @@ private fun MessageRow(message: ChatMessage) {
     val isUser = message.role == "user"
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Card(
-            modifier = Modifier.widthIn(max = 820.dp),
+            modifier = Modifier.width(820.dp),
             shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
             backgroundColor = if (isUser) Color(0xFF303030) else Color.Transparent,
             elevation = 0.dp,
