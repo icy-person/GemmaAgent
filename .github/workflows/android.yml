@@ -34,9 +34,13 @@ jobs:
           ln -sfn /opt/gradle/gradle-9.7.1 /opt/gradle/current
           /opt/gradle/current/bin/gradle --version
 
+      - name: Run shared runtime smoke tests
+        run: |
+          /opt/gradle/current/bin/gradle :shared:jvmTest --no-daemon --stacktrace
+
       - name: Build portable Linux distribution
         run: |
-          /opt/gradle/current/bin/gradle :desktop:clean :desktop:createDistributable --no-daemon
+          /opt/gradle/current/bin/gradle :desktop:clean :desktop:createDistributable --no-daemon --stacktrace
           test -d desktop/build/compose/binaries/main/app/GemmaAgent
           mkdir -p dist
           tar -C desktop/build/compose/binaries/main/app \
