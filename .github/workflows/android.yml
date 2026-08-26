@@ -23,8 +23,10 @@ jobs:
             zip \
             which \
             curl \
-            wget
+            wget \
+            chromium
           java -version
+          chromium --version
 
       - name: Install official Gradle 9.7.1
         run: |
@@ -46,10 +48,13 @@ jobs:
           tar -C desktop/build/compose/binaries/main/app \
             -czf dist/GemmaAgent-Arch-x86_64.tar.gz GemmaAgent
 
-      - name: Verify distribution
+      - name: Verify distribution and browser support
         run: |
           test -s dist/GemmaAgent-Arch-x86_64.tar.gz
           tar -tzf dist/GemmaAgent-Arch-x86_64.tar.gz | head -50
+          grep -R "ChromiumRenderer" -n desktop/src/main/kotlin >/dev/null
+          chromium --headless=new --disable-gpu --no-sandbox --dump-dom about:blank >/tmp/chromium-dom.html
+          test -s /tmp/chromium-dom.html
 
       - name: Upload Arch/CachyOS distribution
         uses: actions/upload-artifact@v4
