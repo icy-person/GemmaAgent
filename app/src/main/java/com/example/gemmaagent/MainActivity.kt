@@ -23,7 +23,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,16 +35,17 @@ import com.example.gemmaagent.shared.AgentEngine
 import com.example.gemmaagent.shared.AgentEvent
 import com.example.gemmaagent.shared.AgentMode
 import com.example.gemmaagent.shared.AgentObserver
+import com.example.gemmaagent.shared.AndroidAgentContext
 import com.example.gemmaagent.shared.CalculatorTool
 import com.example.gemmaagent.shared.DateTimeTool
 import com.example.gemmaagent.shared.EchoTool
 import com.example.gemmaagent.shared.platformTools
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AndroidAgentContext.context = applicationContext
         setContent { GemmaAgentApp() }
     }
 }
@@ -166,15 +166,9 @@ private fun GemmaAgentApp() {
             ) { Text("Run Agent") }
 
             Text("Answer", style = MaterialTheme.typography.titleMedium)
-            Text(
-                answer,
-                modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-            )
+            Text(answer, modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()))
             Text("Agent events", style = MaterialTheme.typography.titleMedium)
-            Text(
-                events.value.takeLast(12).joinToString("\n"),
-                modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
-            )
+            Text(events.value.takeLast(12).joinToString("\n"), modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()))
         }
     }
 }
