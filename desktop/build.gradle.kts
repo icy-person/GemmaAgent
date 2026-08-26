@@ -14,5 +14,14 @@ dependencies {
 compose.desktop {
     application {
         mainClass = "com.example.gemmaagent.desktop.MainKt"
+        nativeDistributions {
+            packageName = "GemmaAgent"
+            packageVersion = "0.1.0"
+            targetFormats(
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb,
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Rpm,
+                org.jetbrains.compose.desktop.application.dsl.TargetFormat.TarGz,
+            )
+        }
     }
 }
