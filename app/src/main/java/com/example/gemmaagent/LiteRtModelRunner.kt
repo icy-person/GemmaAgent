@@ -49,6 +49,7 @@ class LiteRtModelRunner(
         c.sendMessage(prompt).text
     }
 
+    @OptIn(kotlin.io.encoding.ExperimentalEncodingApi::class)
     override suspend fun generate(contents: List<ModelContent>): String = withContext(Dispatchers.Default) {
         val c = conversation ?: error("Model is not started")
         val mapped = contents.map {
