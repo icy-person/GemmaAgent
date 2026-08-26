@@ -36,7 +36,7 @@ jobs:
       - name: Build Rust Android library
         run: |
           chmod +x rust-core/build_android.sh
-          ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/29.0.13113456" ./rust-core/build_android.sh
+          ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/29.0.13113456" ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/29.0.13113456" ./rust-core/build_android.sh
       - name: Verify native libraries
         run: |
           test -f app/src/main/jniLibs/arm64-v8a/libgemma_agent_core.so
