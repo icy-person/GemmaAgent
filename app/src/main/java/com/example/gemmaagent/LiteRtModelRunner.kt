@@ -23,10 +23,11 @@ class LiteRtModelRunner(
 ) : ModelRunner, AutoCloseable {
     private var engine: Engine? = null
     private var conversation: Conversation? = null
-    private var started = false
+    @Volatile private var started = false
 
     suspend fun start(toolDefinitions: List<OpenApiTool>) = withContext(Dispatchers.IO) {
-        val e = Engine(
+        closeInternal()
+        val newEngine = Engine(
             EngineConfig(
                 modelPath = modelPath,
                 backend = backend,
@@ -35,19 +36,26 @@ class LiteRtModelRunner(
                 audioBackend = Backend.CPU(),
             )
         )
-        e.initialize()
-        engine = e
-        conversation = createConversation(e, toolDefinitions)
-        started = true
+        try {
+            newEngine.initialize()
+            val newConversation = createConversation(newEngine, toolDefinitions)
+            engine = newEngine
+            conversation = newConversation
+            started = true
+        } catch (t: Throwable) {
+            runCatching { newEngine.close() }
+            started = false
+            throw t
+        }
     }
 
     private fun createConversation(e: Engine, toolDefinitions: List<OpenApiTool>): Conversation =
         e.createConversation(
             ConversationConfig(
                 samplerConfig = SamplerConfig(
-                    topK = settings.topK,
-                    topP = settings.topP.toDouble(),
-                    temperature = settings.temperature.toDouble(),
+                    topK = settings.topK.coerceAtLeast(1),
+                    topP = settings.topP.toDouble().coerceIn(0.01, 1.0),
+                    temperature = settings.temperature.toDouble().coerceIn(0.0, 2.0),
                 ),
                 automaticToolCalling = false,
                 tools = toolDefinitions.map { tool(it) },
@@ -55,18 +63,21 @@ class LiteRtModelRunner(
         )
 
     override suspend fun reset() = withContext(Dispatchers.IO) {
-        val e = engine ?: return@withContext
-        conversation?.close()
+        check(started) { "Model is not started" }
+        val e = engine ?: error("Model engine is unavailable")
+        conversation?.let { runCatching { it.close() } }
         conversation = createConversation(e, emptyList())
     }
 
     override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
+        require(prompt.isNotBlank()) { "Prompt must not be blank" }
         check(started) { "Model is not started" }
         val c = conversation ?: error("Model conversation is unavailable")
         c.sendMessage(prompt).toString()
     }
 
     override suspend fun generate(contents: List<ModelContent>): String = withContext(Dispatchers.Default) {
+        require(contents.isNotEmpty()) { "Model contents must not be empty" }
         check(started) { "Model is not started" }
         val c = conversation ?: error("Model conversation is unavailable")
         val mapped = contents.map {
@@ -81,9 +92,13 @@ class LiteRtModelRunner(
         c.sendMessage(Contents.of(mapped)).toString()
     }
 
-    override fun close() {
-        conversation?.close(); conversation = null
-        engine?.close(); engine = null
+    private fun closeInternal() {
         started = false
+        conversation?.let { runCatching { it.close() } }
+        conversation = null
+        engine?.let { runCatching { it.close() } }
+        engine = null
     }
+
+    override fun close() = synchronized(this) { closeInternal() }
 }
