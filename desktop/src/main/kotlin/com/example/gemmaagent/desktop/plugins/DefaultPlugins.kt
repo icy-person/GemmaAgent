@@ -6,9 +6,11 @@ import com.example.gemmaagent.shared.RagPlugin
 import java.io.File
 
 suspend fun installDefaultPlugins(registry: PluginRegistry, dataDir: File) {
+    val workspace = File(dataDir, "workspace").apply { mkdirs() }
     registry.install(WebResearchPlugin())
     registry.install(GitHubPlugin())
     registry.install(RagPlugin(JvmRagStore(File(dataDir, "rag/index.json"))))
-    registry.install(FileIntelligencePlugin(File(dataDir, "workspace").apply { mkdirs() }))
-    registry.install(DevOpsPlugin(File(dataDir, "workspace").apply { mkdirs() }))
+    registry.install(FileIntelligencePlugin(workspace))
+    registry.install(DevOpsPlugin(workspace))
+    registry.install(AdvancedPlugins(workspace, dataDir))
 }
