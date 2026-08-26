@@ -19,6 +19,7 @@ compose.desktop {
         nativeDistributions {
             packageName = "GemmaAgent"
             packageVersion = "0.1.0"
+            modules("java.net.http")
             targetFormats(
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb,
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Rpm,
