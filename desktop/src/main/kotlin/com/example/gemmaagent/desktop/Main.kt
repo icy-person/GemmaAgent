@@ -46,6 +46,7 @@ import com.example.gemmaagent.shared.CalculatorTool
 import com.example.gemmaagent.shared.DateTimeTool
 import com.example.gemmaagent.shared.EchoTool
 import com.example.gemmaagent.shared.JvmMemoryStore
+import com.example.gemmaagent.shared.ModelBenchmark
 import com.example.gemmaagent.shared.PluginRegistry
 import com.example.gemmaagent.shared.platformTools
 import com.google.ai.edge.litertlm.Backend
@@ -109,8 +110,6 @@ private class DesktopModelRunner(private val path: String) : com.example.gemmaag
     override fun close() { runCatching { conversation?.close() }; runCatching { engine?.close() }; conversation = null; engine = null; state = ModelState.CLOSED }
 }
 
-data class ModelBenchmark(val firstTokenMs: Long, val totalMs: Long, val estimatedTokens: Int, val tokensPerSecond: Double)
-
 fun main() = application {
     Window(onCloseRequest = ::exitApplication, title = "GemmaAgent Desktop") {
         var tab by remember { mutableStateOf(0) }
@@ -170,7 +169,7 @@ fun main() = application {
     }
 }
 
-@Composable private fun AgentPage(task: String, onTask: (String) -> Unit, answer: String, status: String, enabled: Boolean, run: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Agent", style = MaterialTheme.typography.h5); Text(status); OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Task") }, minLines = 5); Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text("Run Agent") }; Card(Modifier.fillMaxWidth().weight(1f)) { Text(answer, Modifier.padding(14.dp).verticalScroll(rememberScrollState())) } } }
+@Composable private fun AgentPage(task: String, onTask: (String) -> Unit, answer: String, status: String, enabled: Boolean, run: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Agent", style = MaterialTheme.typography.h5); Text(status); OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Task") }, minLines = 5); Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text("Run Agent") }; Card(Modifier.fillMaxWidth()) { Text(answer, Modifier.padding(14.dp).verticalScroll(rememberScrollState())) } } }
 @Composable private fun ResearchPage(task: String, onTask: (String) -> Unit, answer: String, enabled: Boolean, run: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Web Research", style = MaterialTheme.typography.h5); Text("Search, render JavaScript pages, extract relevant evidence and cite sources."); OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Research topic") }, minLines = 5); Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text("Research") }; Card(Modifier.fillMaxSize()) { Text(answer, Modifier.padding(14.dp).verticalScroll(rememberScrollState())) } } }
 @Composable private fun ModelPage(path: String, onPath: (String) -> Unit, status: String, choose: () -> Unit, unload: () -> Unit) { Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Model", style = MaterialTheme.typography.h5); Text(status); OutlinedTextField(path, onPath, Modifier.fillMaxWidth(), label = { Text(".litertlm model path") }); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = choose) { Text("Import / Load") }; OutlinedButton(onClick = unload) { Text("Unload") } } } }
 @Composable private fun LearningPage(learnFailures: Boolean, onFailures: (Boolean) -> Unit, skills: Boolean, onSkills: (Boolean) -> Unit, reflection: Boolean, onReflection: (Boolean) -> Unit) { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Learning", style = MaterialTheme.typography.h5); CheckRow("Learn from failed runs", learnFailures, onFailures); CheckRow("Learn reusable skills", skills, onSkills); CheckRow("Self-reflection / verification", reflection, onReflection); Text("Learning updates external memory and skills; Gemma weights remain unchanged.") } }
