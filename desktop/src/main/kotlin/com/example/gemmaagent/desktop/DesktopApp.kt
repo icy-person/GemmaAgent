@@ -78,11 +78,7 @@ private class AppModelRunner(private val path: String) : com.example.gemmaagent.
     override suspend fun reset() = withContext(Dispatchers.IO) {
         val e = engine ?: error("Model is not loaded")
         conversation?.close()
-        conversation = e.createConversation(
-            ConversationConfig(systemInstruction = Contents.of(
-                "You are GemmaAgent. Use tools when useful, verify tool results, use retrieved evidence when supplied, and never invent citations."
-            ))
-        )
+        conversation = e.createConversation(ConversationConfig(systemInstruction = Contents.of("You are GemmaAgent. Use tools when useful, verify tool results, use retrieved evidence when supplied, and never invent citations.")))
     }
 
     override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
@@ -135,20 +131,7 @@ fun main() = application {
             val runner = model ?: return
             scope.launch {
                 val tools = registry.allTools()
-                agent = AgentEngine(
-                    model = runner,
-                    memory = memory,
-                    tools = tools,
-                    config = AgentConfig(
-                        maxIterations = maxIterations.toInt(),
-                        memoryTopK = memoryTopK.toInt(),
-                        skillTopK = 5,
-                        reflectionEnabled = true,
-                        learnFromFailures = true,
-                        mode = mode,
-                    ),
-                    observer = observer,
-                )
+                agent = AgentEngine(model = runner, memory = memory, tools = tools, config = AgentConfig(maxIterations = maxIterations.toInt(), memoryTopK = memoryTopK.toInt(), skillTopK = 5, reflectionEnabled = true, learnFromFailures = true, mode = mode), observer = observer)
                 status = "Agent ready (${tools.size} tools)"
             }
         }
@@ -162,37 +145,24 @@ fun main() = application {
         }
 
         val pages = Page.values().toList()
+        val topPages = pages.take(6)
         MaterialTheme {
             Row(Modifier.fillMaxSize()) {
                 Column(Modifier.width(220.dp).fillMaxHeight().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("GemmaAgent", style = MaterialTheme.typography.h5)
                     Text(status)
                     Divider()
-                    pages.forEach { item ->
-                        Button(onClick = { page = item }, Modifier.fillMaxWidth()) { Text(item.name.replace('_', ' ')) }
-                    }
+                    pages.forEach { item -> Button(onClick = { page = item }, Modifier.fillMaxWidth()) { Text(item.name.replace('_', ' ')) } }
                 }
                 Column(Modifier.fillMaxSize().padding(14.dp)) {
-                    TabRow(selectedTabIndex = page.ordinal) {
-                        pages.take(6).forEach { item -> Tab(page == item, { page = item }, text = { Text(item.name.take(7)) }) }
+                    TabRow(selectedTabIndex = topPages.indexOf(page).coerceAtLeast(0)) {
+                        topPages.forEach { item -> Tab(page == item, { page = item }, text = { Text(item.name.take(8)) }) }
                     }
                     Spacer(Modifier.height(12.dp))
                     when (page) {
                         Page.HOME -> HomePage(status, modelPath, agent != null, metrics.snapshot())
-                        Page.AGENT -> AgentPage(task, { task = it }, answer, agent != null) {
-                            scope.launch {
-                                runCatching { agent!!.run(task).answer }
-                                    .onSuccess { answer = it; status = "Task completed" }
-                                    .onFailure { answer = "Error: ${it.message}"; status = "Task failed" }
-                            }
-                        }
-                        Page.RESEARCH -> AgentPage("Research: $task", { task = it }, answer, agent != null) {
-                            scope.launch {
-                                runCatching { agent!!.run("Research this topic thoroughly on the public web, use the web research plugin, and produce a cited report: $task").answer }
-                                    .onSuccess { answer = it; status = "Research completed" }
-                                    .onFailure { answer = "Research error: ${it.message}" }
-                            }
-                        }
+                        Page.AGENT -> AgentPage(task, { task = it }, answer, agent != null) { scope.launch { runCatching { agent!!.run(task).answer }.onSuccess { answer = it; status = "Task completed" }.onFailure { answer = "Error: ${it.message}"; status = "Task failed" } } }
+                        Page.RESEARCH -> AgentPage(task, { task = it }, answer, agent != null) { scope.launch { runCatching { agent!!.run("Research this topic thoroughly on the public web, use the web research plugin, and produce a cited report: $task").answer }.onSuccess { answer = it; status = "Research completed" }.onFailure { answer = "Research error: ${it.message}" } } }
                         Page.MODEL -> ModelPage(modelPath, { modelPath = it }, status, {
                             val chooser = JFileChooser().apply { dialogTitle = "Select Gemma 4 E4B .litertlm" }
                             if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
@@ -209,9 +179,7 @@ fun main() = application {
                                     }.onFailure { status = "Load failed: ${it.message}" }
                                 }
                             }
-                        }, {
-                            model?.close(); model = null; agent = null; status = "Model unloaded"
-                        })
+                        }, { model?.close(); model = null; agent = null; status = "Model unloaded" })
                         Page.WORKBENCH -> WorkbenchPage(registry)
                         Page.RAG -> RagPage(rag, ragQuery, { ragQuery = it }, ragFile, { ragFile = it }, ragResult, { ragResult = it })
                         Page.PLUGINS -> PluginPage(registry)
@@ -225,34 +193,10 @@ fun main() = application {
     }
 }
 
-@Composable private fun HomePage(status: String, modelPath: String, agentReady: Boolean, metrics: Map<String, Long>) = Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-    Text("Overview", style = MaterialTheme.typography.h5)
-    Text(status); Text("Model: ${modelPath.ifBlank { "not selected" }}"); Text("Agent: ${if (agentReady) "ready" else "not ready"}"); Text("Metrics: $metrics")
-}
-
-@Composable private fun AgentPage(task: String, onTask: (String) -> Unit, answer: String, enabled: Boolean, run: () -> Unit) = Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-    Text("Agent", style = MaterialTheme.typography.h5); OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Task") }, minLines = 5)
-    Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text("Run") }
-    Card(Modifier.fillMaxSize()) { Text(answer, Modifier.padding(14.dp).verticalScroll(rememberScrollState())) }
-}
-
-@Composable private fun ModelPage(path: String, onPath: (String) -> Unit, status: String, load: () -> Unit, unload: () -> Unit) = Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-    Text("Model", style = MaterialTheme.typography.h5); Text(status); OutlinedTextField(path, onPath, Modifier.fillMaxWidth(), label = { Text(".litertlm") })
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = load) { Text("Load") }; OutlinedButton(onClick = unload) { Text("Unload") } }
-}
-
-@Composable private fun RagPage(rag: RagEngine, query: String, onQuery: (String) -> Unit, file: String, onFile: (String) -> Unit, result: String, onResult: (String) -> Unit) {
-    val scope = rememberCoroutineScope()
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Local RAG", style = MaterialTheme.typography.h5); Text("Persistent document retrieval without changing Gemma weights.")
-        OutlinedTextField(file, onFile, Modifier.fillMaxWidth(), label = { Text("Text/Markdown file path") })
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { scope.launch { runCatching { val f = File(file); rag.ingest(RagDocument(f.name, f.absolutePath, f.name, f.readText())); onResult("Indexed ${f.name}") }.onFailure { onResult("RAG error: ${it.message}") } } }) { Text("Index file") } }
-        OutlinedTextField(query, onQuery, Modifier.fillMaxWidth(), label = { Text("Query") })
-        Button(onClick = { scope.launch { onResult(rag.context(query)) } }) { Text("Retrieve") }
-        Card(Modifier.fillMaxWidth()) { Text(result, Modifier.padding(12.dp)) }
-    }
-}
-
+@Composable private fun HomePage(status: String, modelPath: String, agentReady: Boolean, metrics: Map<String, Long>) = Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Overview", style = MaterialTheme.typography.h5); Text(status); Text("Model: ${modelPath.ifBlank { "not selected" }}"); Text("Agent: ${if (agentReady) "ready" else "not ready"}"); Text("Metrics: $metrics") }
+@Composable private fun AgentPage(task: String, onTask: (String) -> Unit, answer: String, enabled: Boolean, run: () -> Unit) = Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Agent", style = MaterialTheme.typography.h5); OutlinedTextField(task, onTask, Modifier.fillMaxWidth(), label = { Text("Task") }, minLines = 5); Button(onClick = run, enabled = enabled && task.isNotBlank()) { Text("Run") }; Card(Modifier.fillMaxSize()) { Text(answer, Modifier.padding(14.dp).verticalScroll(rememberScrollState())) } }
+@Composable private fun ModelPage(path: String, onPath: (String) -> Unit, status: String, load: () -> Unit, unload: () -> Unit) = Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Model", style = MaterialTheme.typography.h5); Text(status); OutlinedTextField(path, onPath, Modifier.fillMaxWidth(), label = { Text(".litertlm") }); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = load) { Text("Load") }; OutlinedButton(onClick = unload) { Text("Unload") } } }
+@Composable private fun RagPage(rag: RagEngine, query: String, onQuery: (String) -> Unit, file: String, onFile: (String) -> Unit, result: String, onResult: (String) -> Unit) { val scope = rememberCoroutineScope(); Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Local RAG", style = MaterialTheme.typography.h5); Text("Persistent document retrieval without changing Gemma weights."); OutlinedTextField(file, onFile, Modifier.fillMaxWidth(), label = { Text("Text/Markdown file path") }); Button(onClick = { scope.launch { runCatching { val f = File(file); require(f.isFile) { "File not found" }; rag.ingest(RagDocument(f.name, f.absolutePath, f.name, f.readText())); onResult("Indexed ${f.name}") }.onFailure { onResult("RAG error: ${it.message}") } } }) { Text("Index file") }; OutlinedTextField(query, onQuery, Modifier.fillMaxWidth(), label = { Text("Query") }); Button(onClick = { scope.launch { onResult(rag.context(query)) } }, enabled = query.isNotBlank()) { Text("Retrieve") }; Card(Modifier.fillMaxWidth()) { Text(result, Modifier.padding(12.dp)) } } }
 @Composable private fun PluginPage(registry: PluginRegistry) { val scope = rememberCoroutineScope(); var text by remember { mutableStateOf("") }; Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { scope.launch { text = registry.all().joinToString("\n") { "${it.manifest.name} ${it.manifest.version}: ${it.manifest.description}" } } }) { Text("Refresh plugins") }; Text(text) } }
 @Composable private fun MemoryPage(memory: JvmMemoryStore) { val scope = rememberCoroutineScope(); var text by remember { mutableStateOf("") }; Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { scope.launch { text = "Experiences: ${memory.count()}" } }) { Text("Refresh") }; Text(text) } }
 @Composable private fun SettingsPage(mode: AgentMode, onMode: (AgentMode) -> Unit, iterations: Float, onIterations: (Float) -> Unit, memoryTopK: Float, onMemory: (Float) -> Unit) = Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) { Text("Settings", style = MaterialTheme.typography.h5); AgentMode.values().forEach { m -> Row(verticalAlignment = Alignment.CenterVertically) { androidx.compose.material.RadioButton(mode == m, { onMode(m) }); Text(m.name) } }; Text("Max iterations: ${iterations.toInt()}"); androidx.compose.material.Slider(iterations, onIterations, valueRange = 1f..50f); Text("RAG/Memory top-K: ${memoryTopK.toInt()}"); androidx.compose.material.Slider(memoryTopK, onMemory, valueRange = 0f..20f) }
