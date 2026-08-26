@@ -2,7 +2,6 @@ package com.example.gemmaagent.desktop
 
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.charset.StandardCharsets
@@ -10,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withContext
 
 /** A local web research pipeline: search -> fetch -> parse -> rank -> deduplicate -> crawl. */
 class WebResearchEngine(
@@ -46,11 +44,29 @@ class WebResearchEngine(
         val firstResults = search(query).take(config.maxResults)
         val firstSources = fetchSources(query, firstResults, config)
         val discovered = if (config.crawlDepth > 0) discoverAndFetch(query, firstSources, config) else emptyList()
-        val all = deduplicateSources((firstSources + discovered)).take(maxPages)
-        val evidence = all.flatMap { source -> source.chunks.map { "${source.title} (${source.url}): ${it.text}" } }
-            .sortedByDescending { relevance(query, it) }
-            .take(18)
-        return Report(query, all, evidence)
+        val all = deduplicateSources(firstSources + discovered).take(maxPages)
+        val bounded = boundSources(all, config.maxTotalChars.coerceAtLeast(10_000))
+        val evidence = bounded.flatMap { source ->
+            source.chunks.map { "${source.title} (${source.url}): ${it.text}" }
+        }.sortedByDescending { relevance(query, it) }.take(18)
+        return Report(query, bounded, evidence)
+    }
+
+    private fun boundSources(items: List<Source>, maxChars: Int): List<Source> {
+        var used = 0
+        val result = ArrayList<Source>()
+        for (source in items) {
+            if (used >= maxChars) break
+            val remaining = maxChars - used
+            val text = source.text.take(remaining)
+            val chunks = source.chunks.takeWhile { chunk ->
+                used + chunk.text.length <= maxChars
+            }
+            if (text.isBlank()) continue
+            result += source.copy(text = text, chunks = if (chunks.isEmpty()) listOf(Chunk(text.take(4000), 0.0)) else chunks)
+            used += text.length
+        }
+        return result
     }
 
     private suspend fun fetchSources(query: String, results: List<SearchResult>, config: Config): List<Source> = coroutineScope {
@@ -77,7 +93,7 @@ class WebResearchEngine(
             .sortedByDescending { it.second }
         val selected = ranked.take(maxChunksPerPage)
         val text = selected.joinToString("\n\n") { it.first }.take(maxPageChars)
-        val chunks = buildChunks(selected)
+        val chunks = selected.map { (block, score) -> Chunk(block, score) }
         val links = extractRelevantLinks(doc, URI(url))
         return Source(url, title, text, chunks, links)
     }
@@ -89,17 +105,12 @@ class WebResearchEngine(
 
     private fun extractBlocks(doc: Document): List<String> {
         val root = doc.select("article,main,[role=main]").firstOrNull() ?: doc.body() ?: return emptyList()
-        val elements = root.select("h1,h2,h3,h4,p,li,blockquote,pre")
-        return elements.mapNotNull { element ->
+        return root.select("h1,h2,h3,h4,p,li,blockquote,pre").mapNotNull { element ->
             val text = element.text().replace(Regex("\\s+"), " ").trim()
             val tag = element.tagName()
             val min = if (tag.startsWith("h")) 8 else 35
             text.takeIf { it.length >= min && it.length <= 5000 }
         }.distinct()
-    }
-
-    private fun buildChunks(selected: List<Pair<String, Double>>): List<Chunk> {
-        return selected.map { (text, score) -> Chunk(text, score) }
     }
 
     private fun extractRelevantLinks(doc: Document, base: URI): List<String> =
@@ -182,8 +193,7 @@ class WebResearchEngine(
             val code = connection.responseCode
             require(code in 200..399) { "HTTP $code" }
             connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader ->
-                val data = reader.readText()
-                data.take(2_000_000)
+                reader.readText().take(2_000_000)
             }
         } finally {
             connection.disconnect()
