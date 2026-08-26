@@ -8,6 +8,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
+import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -31,31 +32,35 @@ class WebResearchTool(
         .followRedirects(HttpClient.Redirect.NORMAL)
         .build()
 
-    override suspend fun execute(argumentsJson: String): ToolResult {
-        return runCatching {
-            val args = Json.parseToJsonElement(argumentsJson).jsonObject
-            val query = args["query"]?.jsonPrimitive?.content?.trim().orEmpty()
-            require(query.isNotBlank()) { "query is required" }
-            val requested = args["max_results"]?.jsonPrimitive?.content?.toIntOrNull() ?: maxResults
-            val limit = requested.coerceIn(1, maxResults)
-            val links = search(query).take(limit)
-            val gathered = links.mapNotNull { result ->
-                runCatching { fetchPage(result.first)?.let { result.second to it } }.getOrNull()
+    override suspend fun execute(argumentsJson: String): ToolResult = runCatching {
+        val args = Json.parseToJsonElement(argumentsJson).jsonObject
+        val query = args["query"]?.jsonPrimitive?.content?.trim().orEmpty()
+        require(query.isNotBlank()) { "query is required" }
+        val requested = args["max_results"]?.jsonPrimitive?.content?.toIntOrNull() ?: maxResults
+        val limit = requested.coerceIn(1, maxResults)
+        val links = search(query).take(limit)
+        val gathered = links.mapNotNull { result ->
+            runCatching { fetchPage(result.first)?.let { Page(result.first, result.second, it) } }.getOrNull()
+        }
+        val out = buildString {
+            appendLine("WEB RESEARCH: $query")
+            gathered.forEachIndexed { index, item ->
+                appendLine("\n[${index + 1}] ${item.title}")
+                appendLine("URL: ${item.url}")
+                appendLine(item.text)
             }
-            val out = buildString {
-                appendLine("WEB RESEARCH: $query")
-                gathered.forEachIndexed { index, item ->
-                    appendLine("\n[${index + 1}] ${item.first}")
-                    appendLine(item.second)
-                }
-                if (gathered.isEmpty()) appendLine("No readable pages were retrieved.")
-            }
-            ToolResult(true, out.take(maxPageChars * limit), metadata = mapOf("sources" to gathered.size.toString()))
-        }.getOrElse { ToolResult(false, "Web research failed: ${it.message}") }
-    }
+            if (gathered.isEmpty()) appendLine("No readable pages were retrieved.")
+        }
+        ToolResult(true, out.take(maxPageChars * limit), metadata = mapOf(
+            "sources" to gathered.size.toString(),
+            "query" to query,
+        ))
+    }.getOrElse { ToolResult(false, "Web research failed: ${it.message}") }
+
+    private data class Page(val url: String, val title: String, val text: String)
 
     private fun search(query: String): List<Pair<String, String>> {
-        val url = "https://html.duckduckgo.com/html/?q=" + java.net.URLEncoder.encode(query, Charsets.UTF_8)
+        val url = "https://html.duckduckgo.com/html/?q=" + URLEncoder.encode(query, Charsets.UTF_8)
         val html = get(url)
         val pattern = Pattern.compile("<a[^>]+class=\\\"result__a\\\"[^>]+href=\\\"([^\\\"]+)\\\"[^>]*>(.*?)</a>", Pattern.CASE_INSENSITIVE)
         val matcher = pattern.matcher(html)
@@ -64,7 +69,11 @@ class WebResearchTool(
             val rawUrl = matcher.group(1)
             val title = clean(matcher.group(2))
             val resolved = if (rawUrl.startsWith("//")) "https:$rawUrl" else rawUrl
-            if (resolved.startsWith("http")) results += resolved to title
+            runCatching {
+                val uri = URI(resolved)
+                require(uri.scheme == "http" || uri.scheme == "https")
+                results += resolved to title
+            }
         }
         return results.distinctBy { it.first }
     }
@@ -72,7 +81,7 @@ class WebResearchTool(
     private fun fetchPage(url: String): String {
         val html = get(url)
         val noScript = html.replace(Regex("(?is)<script.*?</script>|<style.*?</style>|<noscript.*?</noscript>"), " ")
-        val text = noScript
+        return noScript
             .replace(Regex("(?is)<br\\s*/?>"), "\n")
             .replace(Regex("(?is)</p>|</div>|</article>|</li>|</h[1-6]>"), "\n")
             .replace(Regex("(?is)<[^>]+>"), " ")
@@ -82,17 +91,21 @@ class WebResearchTool(
             .replace(Regex("&#39;"), "'")
             .replace(Regex("\\s+"), " ")
             .trim()
-        return text.take(maxPageChars)
+            .take(maxPageChars)
     }
 
     private fun get(url: String): String {
-        val request = HttpRequest.newBuilder(URI(url))
+        val uri = URI(url)
+        require(uri.scheme == "http" || uri.scheme == "https") { "Only HTTP(S) URLs are supported" }
+        val request = HttpRequest.newBuilder(uri)
             .timeout(Duration.ofSeconds(20))
             .header("User-Agent", "GemmaAgent/1.0 research client")
             .header("Accept", "text/html,application/xhtml+xml")
             .GET()
             .build()
-        return client.send(request, HttpResponse.BodyHandlers.ofString()).body()
+        val response = client.send(request, HttpResponse.BodyHandlers.ofString())
+        require(response.statusCode() in 200..399) { "HTTP ${response.statusCode()}" }
+        return response.body()
     }
 
     private fun clean(html: String): String = html.replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
