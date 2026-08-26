@@ -51,11 +51,11 @@ class RagEngine(
         val hits = retrieve(query, limit)
         return buildString {
             hits.forEachIndexed { index, hit ->
-                append("[${index + 1}] ${hit.chunk.title.ifBlank { hit.chunk.source }}\\n")
-                append("SOURCE: ${hit.chunk.source}\\n")
-                append("SCORE: ${"%.3f".format(hit.score)}\\n")
+                append("[${index + 1}] ${hit.chunk.title.ifBlank { hit.chunk.source }}\n")
+                append("SOURCE: ${hit.chunk.source}\n")
+                append("SCORE: ${"%.3f".format(hit.score)}\n")
                 append(hit.chunk.text)
-                append("\\n\\n")
+                append("\n\n")
             }
         }.take(maxChars)
     }
@@ -74,15 +74,7 @@ class RagEngine(
                 if (boundary > start + chunkChars / 2) actualEnd = boundary
             }
             val chunkText = text.substring(start, actualEnd).trim()
-            if (chunkText.isNotBlank()) result += RagChunk(
-                id = "${document.id}:$index",
-                documentId = document.id,
-                source = document.source,
-                title = document.title,
-                text = chunkText,
-                start = start,
-                end = actualEnd,
-            )
+            if (chunkText.isNotBlank()) result += RagChunk("${document.id}:$index", document.id, document.source, document.title, chunkText, start, actualEnd)
             if (actualEnd >= text.length) break
             start = maxOf(actualEnd - overlapChars, start + 1)
             index++
