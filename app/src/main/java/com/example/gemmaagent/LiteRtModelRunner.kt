@@ -63,7 +63,7 @@ class LiteRtModelRunner(
     override suspend fun generate(prompt: String): String = withContext(Dispatchers.Default) {
         check(started) { "Model is not started" }
         val c = conversation ?: error("Model conversation is unavailable")
-        c.sendMessage(prompt).text
+        c.sendMessage(prompt).toString()
     }
 
     override suspend fun generate(contents: List<ModelContent>): String = withContext(Dispatchers.Default) {
@@ -78,7 +78,7 @@ class LiteRtModelRunner(
                 is ModelContent.AudioBytes -> Content.AudioBytes(it.bytes)
             }
         }
-        c.sendMessage(Contents.of(mapped)).text
+        c.sendMessage(Contents.of(mapped)).toString()
     }
 
     override fun close() {
