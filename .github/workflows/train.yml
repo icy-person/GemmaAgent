@@ -108,6 +108,21 @@ jobs:
             echo "checkpoint tokenizer restored; keeping existing tokenizer"
           fi
 
+      - name: Validate online collector
+        run: |
+          python3 -m py_compile scripts/prepare_online_corpus.py
+          test -s data/online/train.txt
+          test -s data/online/val.txt
+          test -s data/online_manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          m = json.loads(Path("data/online_manifest.json").read_text(encoding="utf-8"))
+          assert m["pages"] and m["train_pages"] > 0 and m["val_pages"] > 0
+          assert all(row.get("license") for row in m["pages"])
+          print(f"validated online corpus: {len(m['pages'])} pages")
+          PY
+
       - name: Build optimized CPU trainer
         run: cargo build --release --no-default-features --features runner-cpu --bin cpu-train
 
@@ -130,19 +145,24 @@ jobs:
           LOG="run-report/training.log"
           stage=0
           goal_reached=0
-          first_stage=1
 
           while (( $(date +%s) < DEADLINE )); do
             stage=$((stage + 1))
-            case $((stage % 7)) in
-              1) DOMAIN="01-literature"; DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00020" ;;
-              2) DOMAIN="02-code";       DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00012" ;;
-              3) DOMAIN="03-math";       DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00015" ;;
-              4) DOMAIN="04-reasoning";  DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00010" ;;
-              5) DOMAIN="05-balanced";   DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00008" ;;
-              6) DOMAIN="06-online-wikipedia"; DATA="data/online/train.txt"; VAL="data/online/val.txt"; LR="0.00006" ;;
-              0) DOMAIN="00-bootstrap";  DATA="data/bootstrap.txt"; VAL="data/val.txt"; LR="0.00016" ;;
-            esac
+            if [[ "$stage" -eq 1 && ! -s "$TOKENIZER" ]]; then
+              DOMAIN="00-bootstrap"
+              DATA="data/bootstrap.txt"
+              VAL="data/val.txt"
+              LR="0.00016"
+            else
+              case $((stage % 6)) in
+                1) DOMAIN="01-literature"; DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00020" ;;
+                2) DOMAIN="02-code";       DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00012" ;;
+                3) DOMAIN="03-math";       DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00015" ;;
+                4) DOMAIN="04-reasoning";  DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00010" ;;
+                5) DOMAIN="05-balanced";   DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00008" ;;
+                0) DOMAIN="06-online-wikipedia"; DATA="data/online/train.txt"; VAL="data/online/val.txt"; LR="0.00006" ;;
+              esac
+            fi
             echo "===== curriculum stage ${stage}: ${DOMAIN}, profile=large, lr=${LR} =====" | tee -a "$LOG"
 
             if [[ ! -s "$DATA" || ! -s "$VAL" ]]; then
