@@ -1,5 +1,166 @@
-use crate::{autograd::Value,config::Config};
-pub struct Linear{pub w:Value}impl Linear{fn new(i:usize,o:usize,s:&mut u64)->Self{Self{w:Value::parameter(o,i,s)}}fn f(&self,x:&Value)->Value{x.matmul(&self.w.transpose())}}
-pub struct Block{q:Linear,k:Linear,v:Linear,o:Linear,up:Linear,down:Linear}impl Block{fn new(c:&Config,s:&mut u64)->Self{let d=c.d_model;let f=c.ffn;Self{q:Linear::new(d,d,s),k:Linear::new(d,d,s),v:Linear::new(d,d,s),o:Linear::new(d,d,s),up:Linear::new(d,f,s),down:Linear::new(f,d,s)}}}
-pub struct Model{pub cfg:Config,pub emb:Vec<Value>,pub blocks:Vec<Block>}
-impl Model{pub fn new(cfg:Config,seed:u64)->Self{let mut s=seed;let emb=(0..cfg.vocab).map(|_|Value::parameter(1,cfg.d_model,&mut s)).collect();let blocks=(0..cfg.layers).map(|_|Block::new(&cfg,&mut s)).collect();Self{cfg,emb,blocks}}fn attn(&self,b:&Block,st:&[Value],pos:usize)->Value{let q=b.q.f(&st[pos]);let ks:Vec<Value>=st[..=pos].iter().map(|x|b.k.f(x)).collect();let vs:Vec<Value>=st[..=pos].iter().map(|x|b.v.f(x)).collect();let hd=self.cfg.head_dim();let mut outs=Vec::new();for h in 0..self.cfg.heads{let qh=q.slice_cols(h*hd,hd);let mut ss=Vec::new();let mut vv=Vec::new();for j in 0..ks.len(){ss.push(qh.matmul(&ks[j].slice_cols(h*hd,hd).transpose()).div_scalar((hd as f32).sqrt()));vv.push(vs[j].slice_cols(h*hd,hd));}outs.push(Value::concat_cols(&ss).softmax().matmul(&Value::concat_rows(&vv)));}b.o.f(&Value::concat_cols(&outs))}pub fn forward_hidden(&self,t:&[usize])->Value{assert!(!t.is_empty()&&t.len()<=self.cfg.context);let mut st:Vec<Value>=t.iter().map(|&i|self.emb[i].clone()).collect();for b in &self.blocks{let mut n=Vec::with_capacity(st.len());for i in 0..st.len(){let r=st[i].add(&self.attn(b,&st,i));let h=b.up.f(&r).relu();n.push(r.add(&b.down.f(&h)));}st=n}st.pop().unwrap()}pub fn logits(&self,h:&Value)->Value{Value::concat_cols(&self.emb.iter().map(|e|h.matmul(&e.transpose())).collect::<Vec<_>>())}pub fn parameters(&self)->Vec<Value>{let mut p=self.emb.clone();for b in &self.blocks{p.extend([b.q.w.clone(),b.k.w.clone(),b.v.w.clone(),b.o.w.clone(),b.up.w.clone(),b.down.w.clone()]);}p}}
+use crate::{autograd::Value, config::Config};
+
+pub struct Linear {
+    pub w: Value,
+}
+
+impl Linear {
+    fn new(i: usize, o: usize, seed: &mut u64) -> Self {
+        Self {
+            w: Value::parameter(o, i, seed),
+        }
+    }
+
+    fn f(&self, x: &Value) -> Value {
+        x.matmul(&self.w.transpose())
+    }
+}
+
+pub struct Block {
+    q: Linear,
+    k: Linear,
+    v: Linear,
+    o: Linear,
+    up: Linear,
+    down: Linear,
+}
+
+impl Block {
+    fn new(cfg: &Config, seed: &mut u64) -> Self {
+        let d = cfg.d_model;
+        let f = cfg.ffn;
+        Self {
+            q: Linear::new(d, d, seed),
+            k: Linear::new(d, d, seed),
+            v: Linear::new(d, d, seed),
+            o: Linear::new(d, d, seed),
+            up: Linear::new(d, f, seed),
+            down: Linear::new(f, d, seed),
+        }
+    }
+}
+
+pub struct Model {
+    pub cfg: Config,
+    pub emb: Value,
+    pub blocks: Vec<Block>,
+}
+
+impl Model {
+    pub fn new(cfg: Config, seed: u64) -> Self {
+        cfg.validate();
+        let mut seed = seed;
+        let emb = Value::parameter(cfg.vocab, cfg.d_model, &mut seed);
+        let blocks = (0..cfg.layers)
+            .map(|_| Block::new(&cfg, &mut seed))
+            .collect();
+        Self { cfg, emb, blocks }
+    }
+
+    fn positional_encoding(&self, pos: usize) -> Value {
+        let d = self.cfg.d_model;
+        let mut values = vec![0.0; d];
+        for i in 0..d {
+            let exponent = (2 * (i / 2)) as f32 / d as f32;
+            let angle = pos as f32 / 10000.0_f32.powf(exponent);
+            values[i] = if i % 2 == 0 { angle.sin() } else { angle.cos() };
+        }
+        Value::leaf(1, d, values)
+    }
+
+    fn attn(&self, block: &Block, states: &[Value], pos: usize) -> Value {
+        let q = block.q.f(&states[pos]);
+        let keys: Vec<Value> = states[..=pos].iter().map(|x| block.k.f(x)).collect();
+        let values: Vec<Value> = states[..=pos].iter().map(|x| block.v.f(x)).collect();
+        let head_dim = self.cfg.head_dim();
+        let mut heads = Vec::with_capacity(self.cfg.heads);
+
+        for head in 0..self.cfg.heads {
+            let offset = head * head_dim;
+            let qh = q.slice_cols(offset, head_dim);
+            let mut scores = Vec::with_capacity(keys.len());
+            let mut head_values = Vec::with_capacity(values.len());
+            for (k, v) in keys.iter().zip(&values) {
+                scores.push(
+                    qh.matmul(&k.slice_cols(offset, head_dim).transpose())
+                        .div_scalar((head_dim as f32).sqrt()),
+                );
+                head_values.push(v.slice_cols(offset, head_dim));
+            }
+            let weights = Value::concat_cols(&scores).softmax();
+            heads.push(weights.matmul(&Value::concat_rows(&head_values)));
+        }
+
+        block.o.f(&Value::concat_cols(&heads))
+    }
+
+    pub fn forward_hidden(&self, tokens: &[usize]) -> Value {
+        assert!(!tokens.is_empty() && tokens.len() <= self.cfg.context);
+        let mut states: Vec<Value> = tokens
+            .iter()
+            .enumerate()
+            .map(|(pos, &token)| {
+                assert!(token < self.cfg.vocab);
+                self.emb.row(token).add(&self.positional_encoding(pos))
+            })
+            .collect();
+
+        for block in &self.blocks {
+            let mut next = Vec::with_capacity(states.len());
+            for pos in 0..states.len() {
+                let residual = states[pos].add(&self.attn(block, &states, pos));
+                let hidden = block.up.f(&residual).silu();
+                next.push(residual.add(&block.down.f(&hidden)));
+            }
+            states = next;
+        }
+
+        states.pop().expect("non-empty token sequence")
+    }
+
+    pub fn logits(&self, hidden: &Value) -> Value {
+        hidden.matmul(&self.emb.transpose())
+    }
+
+    pub fn parameters(&self) -> Vec<Value> {
+        let mut p = vec![self.emb.clone()];
+        for block in &self.blocks {
+            p.extend([
+                block.q.w.clone(),
+                block.k.w.clone(),
+                block.v.w.clone(),
+                block.o.w.clone(),
+                block.up.w.clone(),
+                block.down.w.clone(),
+            ]);
+        }
+        p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_parameter_count_is_exact() {
+        let cfg = Config::target();
+        let model = Model::new(cfg, 42);
+        let total: usize = model
+            .parameters()
+            .iter()
+            .map(|p| p.data().len())
+            .sum();
+        assert_eq!(total, 19_275_776);
+        assert_eq!(cfg.params(), total);
+    }
+
+    #[test]
+    fn forward_and_logits_have_expected_shapes() {
+        let cfg = Config::debug();
+        let model = Model::new(cfg, 42);
+        let hidden = model.forward_hidden(&[256, b'R' as usize, b'u' as usize]);
+        assert_eq!(hidden.shape(), (1, cfg.d_model));
+        assert_eq!(model.logits(&hidden).shape(), (1, cfg.vocab));
+    }
+}

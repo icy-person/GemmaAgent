@@ -1,6 +1,152 @@
-mod autograd;mod checkpoint;mod config;mod model;mod optim;mod tokenizer;use autograd::Value;use config::Config;use model::Model;use optim::AdamW;use tokenizer::Tokenizer;
-fn argmax(v:&[f32])->usize{v.iter().enumerate().max_by(|a,b|a.1.total_cmp(b.1)).map(|(i,_)|i).unwrap_or(0)}
-fn loss(model:&Model,input:&[usize],target:usize)->Value{model.logits(&model.forward_hidden(input)).softmax().gather(target).log().neg()}
-fn train(steps:usize,path:&str){let c=Config::debug();println!("GemmaAgent: {} params | context {} | {} heads",c.params(),c.context,c.heads);let tok=Tokenizer::new();let d=tok.encode(&tokenizer::tiny_corpus());let m=Model::new(c,42);let p=m.parameters();let mut opt=AdamW::new(.002);for s in 1..=steps{let start=1+s%(d.len()-c.context-2);let l=loss(&m,&d[start..start+c.context],d[start+c.context]);let x=l.data()[0];l.backward();opt.step(&p);if s==1||s%25==0{println!("step {s:4} loss {x:.5}");}}checkpoint::save(path,&p).expect("save failed");println!("checkpoint: {path}");}
-fn infer(path:&str,prompt:&str){let c=Config::debug();let tok=Tokenizer::new();let m=Model::new(c,42);let p=m.parameters();if std::path::Path::new(path).exists(){checkpoint::load(path,&p).expect("load failed");}let mut ids=tok.encode(prompt);ids.pop();for _ in 0..64{let b=ids.len().saturating_sub(c.context);let h=m.forward_hidden(&ids[b..]);let n=argmax(&m.logits(&h).data());ids.push(n);if n==tokenizer::EOS{break;}}println!("{}",tok.decode(&ids));}
-fn main(){let a:Vec<String>=std::env::args().collect();match a.get(1).map(String::as_str){Some("train")=>train(a.get(2).and_then(|x|x.parse().ok()).unwrap_or(300),a.get(3).map(String::as_str).unwrap_or("gemma-agent.ckpt")),Some("infer")=>infer(a.get(2).map(String::as_str).unwrap_or("gemma-agent.ckpt"),a.get(3).map(String::as_str).unwrap_or("Rust is")),_=>{println!("GemmaAgent Rust LLM");println!("cargo test");println!("cargo run --release -- train 300");println!("cargo run --release -- infer gemma-agent.ckpt \"Rust is\"");println!("target config: {} params",Config::target().params());}}}
+mod autograd;
+mod checkpoint;
+mod config;
+mod model;
+mod optim;
+mod tokenizer;
+
+use autograd::Value;
+use config::Config;
+use model::Model;
+use optim::AdamW;
+use tokenizer::Tokenizer;
+
+fn argmax(values: &[f32]) -> usize {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn cross_entropy(model: &Model, input: &[usize], target: usize) -> Value {
+    let hidden = model.forward_hidden(input);
+    let probabilities = model.logits(&hidden).softmax();
+    probabilities.gather(target).log().neg()
+}
+
+fn config_from_args(args: &[String]) -> Config {
+    if args.iter().any(|arg| arg == "--target") {
+        Config::target()
+    } else {
+        Config::debug()
+    }
+}
+
+fn train(steps: usize, path: &str, cfg: Config) {
+    cfg.validate();
+    let tokenizer = Tokenizer::new();
+    let encoded = tokenizer.encode(&tokenizer::tiny_corpus());
+    assert!(encoded.len() > cfg.context + 2, "training corpus is shorter than the configured context");
+
+    println!(
+        "GemmaAgent: {} params | context {} | {} heads | {:.2} MiB fp32",
+        cfg.params(),
+        cfg.context,
+        cfg.heads,
+        cfg.approx_parameter_memory_mb()
+    );
+    if cfg == Config::target() {
+        println!("target profile selected; scalar CPU training is intentionally slow");
+    }
+
+    let model = Model::new(cfg, 42);
+    let parameters = model.parameters();
+    let mut optimizer = AdamW::new(if cfg == Config::target() { 0.0005 } else { 0.002 });
+
+    for step in 1..=steps {
+        let max_start = encoded.len() - cfg.context - 1;
+        let start = (step - 1) % max_start;
+        let loss = cross_entropy(
+            &model,
+            &encoded[start..start + cfg.context],
+            encoded[start + cfg.context],
+        );
+        let value = loss.data()[0];
+        loss.backward();
+        optimizer.step(&parameters);
+
+        if step == 1 || step % 25 == 0 || step == steps {
+            println!("step {step:4} loss {value:.5}");
+        }
+    }
+
+    checkpoint::save(path, &parameters).expect("failed to save checkpoint");
+    println!("checkpoint: {path}");
+}
+
+fn infer(path: &str, prompt: &str, cfg: Config, max_new_tokens: usize) {
+    cfg.validate();
+    let tokenizer = Tokenizer::new();
+    let model = Model::new(cfg, 42);
+    let parameters = model.parameters();
+
+    if !std::path::Path::new(path).exists() {
+        eprintln!("checkpoint not found: {path}");
+        eprintln!("train first, for example: cargo run --release -- train 300 {path}");
+        std::process::exit(2);
+    }
+    checkpoint::load(path, &parameters).expect("failed to load checkpoint");
+
+    let mut tokens = tokenizer.encode(prompt);
+    let _ = tokens.pop();
+    for _ in 0..max_new_tokens {
+        let start = tokens.len().saturating_sub(cfg.context);
+        let hidden = model.forward_hidden(&tokens[start..]);
+        let next = argmax(&model.logits(&hidden).data());
+        tokens.push(next);
+        if next == tokenizer::EOS {
+            break;
+        }
+    }
+    println!("{}", tokenizer.decode(&tokens));
+}
+
+fn print_usage() {
+    println!("GemmaAgent Rust LLM");
+    println!("\nCommands:");
+    println!("  cargo test");
+    println!("  cargo run --release -- train 300 [checkpoint] [--target]");
+    println!("  cargo run --release -- infer [checkpoint] [prompt] [--target] [--tokens N]");
+    println!("\nDefault training profile is the small CPU-debug model.");
+    println!("Use --target for the 19,275,776-parameter / context=1024 / 8-head profile.");
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("train") => {
+            let steps = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(300);
+            let path = args.get(3).map(String::as_str).unwrap_or("gemma-agent.ckpt");
+            train(steps, path, config_from_args(&args));
+        }
+        Some("infer") => {
+            let path = args.get(2).map(String::as_str).unwrap_or("gemma-agent.ckpt");
+            let prompt = args.get(3).map(String::as_str).unwrap_or("Rust is");
+            let max_new = args
+                .iter()
+                .position(|arg| arg == "--tokens")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(64);
+            infer(path, prompt, config_from_args(&args), max_new);
+        }
+        _ => print_usage(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cross_entropy_is_finite() {
+        let cfg = Config::debug();
+        let tokenizer = Tokenizer::new();
+        let ids = tokenizer.encode("Rust");
+        let model = Model::new(cfg, 42);
+        let loss = cross_entropy(&model, &ids[..ids.len() - 1], b'!' as usize);
+        assert!(loss.data()[0].is_finite());
+    }
+}
