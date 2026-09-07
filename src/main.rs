@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn cross_entropy_is_finite() {
         let cfg = Config::debug(); let tokenizer = Tokenizer::new(); let ids = tokenizer.encode("Rust"); let model = Model::new(cfg, 42);
-        let loss = cross_entropy(&model, &ids[..ids.len() - 1], b'!', 4); assert!(loss.data()[0].is_finite());
+        let loss = cross_entropy(&model, &ids[..ids.len() - 1], b'!' as usize, 4); assert!(loss.data()[0].is_finite());
     }
     #[test]
     fn sampler_respects_top_k() { let logits=[0.,1.,2.,3.]; let mut rng=7; for _ in 0..64 { let token=sample_token(&logits,1.,2,&mut rng); assert!(token==2 || token==3); } }
