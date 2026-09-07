@@ -22,6 +22,7 @@
 - KV cache واقعی برای decoding افزایشی
 - autoregressive inference با greedy و sampling
 - sampling با `temperature` و `top-k` بدون dependency جدید
+- benchmark داخلی برای prefill و decode throughput
 - initialization قطعی برای بازتولیدپذیری
 - regression test برای برابری runtime مستقیم با forward مرجع و صحت incremental KV cache
 
@@ -80,7 +81,7 @@ cargo run --release -- train 300 gemma-agent-target.ckpt --target --grad-accum 4
 
 ## Inference
 
-Inference اکنون checkpoint را به runtime مستقیم CPU منتقل می‌کند؛ graph مربوط به autograd در هر token ساخته نمی‌شود و KV cache برای decoding افزایشی نگهداری می‌شود.
+Inference checkpoint را به runtime مستقیم CPU منتقل می‌کند؛ graph مربوط به autograd در هر token ساخته نمی‌شود و KV cache برای decoding افزایشی نگهداری می‌شود.
 
 Greedy:
 
@@ -102,8 +103,20 @@ cargo run --release -- infer gemma-agent-target.ckpt "Rust is" --target --temper
 
 `--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--checkpoint-every 0` یا حذف این گزینه، checkpoint دوره‌ای را غیرفعال می‌کند. `--grad-accum 1` یعنی یک update برای هر window آموزشی.
 
+## Benchmark
+
+برای سنجش runtime مستقیم روی CPU:
+
+```bash
+cargo run --release -- bench
+cargo run --release -- bench --prompt-tokens 128 --tokens 64
+cargo run --release -- bench --target --prompt-tokens 128 --tokens 64
+```
+
+خروجی، زمان و token/s برای prefill و incremental decode را جداگانه گزارش می‌کند. این benchmark با وزن‌های deterministic اجرا می‌شود و به checkpoint نیاز ندارد.
+
 ## وضعیت مهندسی
 
-هستهٔ مدل و runtime مستقیم اکنون قابل تست و قابل بازتولید هستند، اما هنوز یک runtime سریع تولیدی نیست. گام‌های بعدی عبارت‌اند از tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، RMSNorm، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
+هستهٔ مدل و runtime مستقیم اکنون قابل تست و قابل بازتولید هستند. inference از graph autograd جدا شده و KV cache دارد، ولی runtime هنوز production-grade نیست. گام‌های بعدی عبارت‌اند از tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، RMSNorm، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
 
 CI فعلی compilation/lint و regression tests را روی Rust stable اجرا می‌کند.
