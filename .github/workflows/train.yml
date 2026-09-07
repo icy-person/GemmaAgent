@@ -54,7 +54,7 @@ jobs:
       - name: Install Python and helper tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 curl jq
+          sudo apt-get install -y python3 curl jq unzip
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -98,6 +98,16 @@ jobs:
             --min-chars 300 \
             --delay 0.35
 
+      - name: Build tokenizer bootstrap corpus
+        run: |
+          if [[ ! -s checkpoints/gemma-agent.cpu.ckpt.tok ]]; then
+            cat data/train.txt data/online/train.txt > data/bootstrap.txt
+            echo "created tokenizer bootstrap corpus: $(wc -c < data/bootstrap.txt) bytes"
+          else
+            rm -f data/bootstrap.txt
+            echo "checkpoint tokenizer restored; keeping existing tokenizer"
+          fi
+
       - name: Build optimized CPU trainer
         run: cargo build --release --no-default-features --features runner-cpu --bin cpu-train
 
@@ -120,16 +130,18 @@ jobs:
           LOG="run-report/training.log"
           stage=0
           goal_reached=0
+          first_stage=1
 
           while (( $(date +%s) < DEADLINE )); do
             stage=$((stage + 1))
-            case $((stage % 6)) in
+            case $((stage % 7)) in
               1) DOMAIN="01-literature"; DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00020" ;;
               2) DOMAIN="02-code";       DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00012" ;;
               3) DOMAIN="03-math";       DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00015" ;;
               4) DOMAIN="04-reasoning";  DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00010" ;;
               5) DOMAIN="05-balanced";   DATA="data/curriculum/${DOMAIN}.txt"; VAL="data/val.txt"; LR="0.00008" ;;
-              0) DOMAIN="06-online-wikipedia"; DATA="data/online/train.txt"; VAL="data/online/val.txt"; LR="0.00006" ;;
+              6) DOMAIN="06-online-wikipedia"; DATA="data/online/train.txt"; VAL="data/online/val.txt"; LR="0.00006" ;;
+              0) DOMAIN="00-bootstrap";  DATA="data/bootstrap.txt"; VAL="data/val.txt"; LR="0.00016" ;;
             esac
             echo "===== curriculum stage ${stage}: ${DOMAIN}, profile=large, lr=${LR} =====" | tee -a "$LOG"
 
@@ -185,9 +197,10 @@ jobs:
           targets_per_step=${TARGETS_PER_STEP}
           eval_samples=${EVAL_SAMPLES}
           train_context=512
-          curriculum=01-literature,02-code,03-math,04-reasoning,05-balanced,06-online-wikipedia
+          curriculum=00-bootstrap,01-literature,02-code,03-math,04-reasoning,05-balanced,06-online-wikipedia
           online_pages=${ONLINE_PAGES}
           online_manifest=data/online_manifest.json
+          tokenizer_bootstrap=data/bootstrap.txt
           goal=validation_loss_below_1.0
           goal_reached=${goal_reached}
           EOF
@@ -208,3 +221,6 @@ jobs:
             run-report/
             data/corpus_manifest.json
             data/online_manifest.json
+            data/online/train.txt
+            data/online/val.txt
+            data/online/pages/
