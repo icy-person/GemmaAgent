@@ -5,23 +5,18 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      runner:
-        description: "Runner label"
+      runtime_minutes:
+        description: "Maximum wall-clock training time"
         required: true
-        default: "ubuntu-latest"
+        default: "330"
         type: string
       stage_steps:
         description: "Optimizer updates per curriculum stage"
         required: true
         default: "100"
         type: string
-      runtime_minutes:
-        description: "Train continuously for this many minutes"
-        required: true
-        default: "330"
-        type: string
       grad_accum:
-        description: "Gradient accumulation steps"
+        description: "CPU gradient accumulation"
         required: true
         default: "8"
         type: string
@@ -35,9 +30,8 @@ on:
         required: true
         default: "16"
         type: string
-
   schedule:
-    - cron: "0 0,6,12,18 * * *"
+    - cron: "0 */6 * * *"
 
 concurrency:
   group: gemmaagent-cpu-training
@@ -46,29 +40,19 @@ concurrency:
 jobs:
   train:
     name: Continuous CPU curriculum training
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 355
-    permissions:
-      contents: read
-      actions: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Python and helper tools
-        shell: bash
         run: |
-          set -euxo pipefail
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends python3 ca-certificates curl jq
-          fi
+          sudo apt-get update
+          sudo apt-get install -y python3 curl jq
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
 
       - name: Cache Rust build
         uses: actions/cache@v4
@@ -77,43 +61,30 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-rust-cpu-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-cpu-
+            ${{ runner.os }}-cargo-
 
       - name: Restore latest checkpoint artifact
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
           mkdir -p checkpoints
-          previous_run="$(gh run list --workflow train.yml --status success --limit 20 --json databaseId --jq ".[] | select(.databaseId != ${GITHUB_RUN_ID}) | .databaseId" | head -n 1 || true)"
-          if [[ -n "$previous_run" ]]; then
-            echo "Trying previous successful training run: $previous_run"
-            if gh run download "$previous_run" --name gemmaagent-cpu-checkpoint --dir checkpoints; then
-              find checkpoints -maxdepth 2 -type f -print
-            else
-              echo "No downloadable previous checkpoint; starting fresh."
-            fi
+          artifact_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.name=="gemmaagent-cpu-checkpoint" and .expired==false) | [.id,.created_at] | @tsv' | sort -k2 -r | head -n1)"
+          if [[ -n "$artifact_json" ]]; then
+            artifact_id="${artifact_json%%$'\t'*}"
+            echo "restoring artifact $artifact_id"
+            gh api -H "Accept: application/vnd.github+json" "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > /tmp/checkpoint.zip
+            unzip -o /tmp/checkpoint.zip -d .
           fi
 
       - name: Prepare public corpus and curriculum
-        shell: bash
         run: |
-          set -euxo pipefail
           python3 scripts/prepare_real_corpus.py
           python3 scripts/prepare_curriculum.py
-          test -s data/train.txt
-          test -s data/val.txt
-          test -s data/curriculum/01-literature.txt
-          test -s data/curriculum/02-code.txt
-          test -s data/curriculum/03-math.txt
-          test -s data/curriculum/04-reasoning.txt
-          test -s data/curriculum/05-balanced.txt
 
       - name: Build optimized CPU trainer
-        run: cargo build --release --bin cpu-train
+        run: cargo build --release --no-default-features --features runner-cpu --bin cpu-train
 
       - name: Continuous curriculum training
         env:
