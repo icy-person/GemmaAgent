@@ -1,0 +1,124 @@
+name: Train GemmaAgent AMD Vulkan
+
+on:
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: "Optimizer updates"
+        required: true
+        default: "5000"
+        type: string
+      batch_size:
+        description: "GPU batch size"
+        required: true
+        default: "2"
+        type: string
+      grad_accum:
+        description: "Micro-batches per optimizer update"
+        required: true
+        default: "2"
+        type: string
+      gpu_util:
+        description: "Approximate GPU duty cycle; use 100 for maximum throughput"
+        required: true
+        default: "100"
+        type: string
+      online_pages:
+        description: "Maximum online Wikimedia pages"
+        required: true
+        default: "160"
+        type: string
+
+concurrency:
+  group: gemmaagent-amd-training
+  cancel-in-progress: false
+
+jobs:
+  train:
+    name: AMD Vulkan GPU training
+    runs-on: [self-hosted, linux, amd-vulkan]
+    timeout-minutes: 720
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Vulkan runtime
+        run: |
+          command -v vulkaninfo
+          vulkaninfo --summary
+          echo "--- GPU ---"
+          lspci | grep -Ei 'vga|3d|display' || true
+
+      - name: Prepare public and online corpora
+        run: |
+          python3 scripts/prepare_real_corpus.py
+          python3 scripts/prepare_curriculum.py
+          python3 scripts/prepare_online_corpus.py --refresh --max-pages "${{ inputs.online_pages || '160' }}" --pages-per-topic 10 --min-chars 300 --delay 0.35
+
+      - name: Build AMD Vulkan trainer
+        run: cargo build --release --no-default-features --features amd-vulkan --bin amd-train
+
+      - name: Select training data
+        run: |
+          test -s data/online/train.txt
+          test -s data/online/val.txt
+          mkdir -p checkpoints run-report
+
+      - name: Train AMD model
+        shell: bash
+        run: |
+          set -euo pipefail
+          STEPS="${{ inputs.steps || '5000' }}"
+          BATCH="${{ inputs.batch_size || '2' }}"
+          ACCUM="${{ inputs.grad_accum || '2' }}"
+          GPU_UTIL="${{ inputs.gpu_util || '100' }}"
+          CHECKPOINT="checkpoints/gemma-agent-target-amd.bin"
+          BEST="checkpoints/gemma-agent-target-amd.bin.best"
+          TOKENIZER="checkpoints/gemma-agent-target-amd.bin.tok"
+
+          CMD=(./target/release/amd-train --target
+            --steps "$STEPS"
+            --data data/online/train.txt
+            --checkpoint "$CHECKPOINT"
+            --best-checkpoint "$BEST"
+            --tokenizer "$TOKENIZER"
+            --batch-size "$BATCH"
+            --grad-accum "$ACCUM"
+            --lr 0.00015
+            --checkpoint-every 250
+            --eval-every 250
+            --gpu-kind integrated
+            --gpu 0
+            --gpu-util "$GPU_UTIL")
+
+          if [[ -s "$CHECKPOINT" ]]; then CMD+=(--resume "$CHECKPOINT"); fi
+          "${CMD[@]}" 2>&1 | tee run-report/amd-training.log
+
+          cat > run-report/amd-run-info.txt <<EOF
+          commit=${GITHUB_SHA}
+          run_id=${GITHUB_RUN_ID}
+          profile=target-19,275,776-parameters
+          steps=${STEPS}
+          batch_size=${BATCH}
+          grad_accum=${ACCUM}
+          gpu_util=${GPU_UTIL}
+          data=data/online/train.txt
+          validation=data/online/val.txt
+          vulkan=amd-vulkan
+          EOF
+
+      - name: Upload AMD checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemmaagent-amd-checkpoint
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            checkpoints/gemma-agent-target-amd.bin
+            checkpoints/gemma-agent-target-amd.bin.best
+            checkpoints/gemma-agent-target-amd.bin.opt
+            checkpoints/gemma-agent-target-amd.bin.state
+            checkpoints/gemma-agent-target-amd.bin.tok
+            run-report/
+            data/online_manifest.json
