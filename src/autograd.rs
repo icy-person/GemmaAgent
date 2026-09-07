@@ -32,7 +32,7 @@ struct Node {
 
 impl Value {
     fn mk(r: usize, c: usize, d: Vec<f32>, op: Op) -> Self {
-        assert_eq!(r * c, d.len());
+        assert_eq!(r.checked_mul(c), Some(d.len()), "invalid tensor shape");
         Self(Rc::new(RefCell::new(Node {
             r,
             c,
@@ -46,11 +46,11 @@ impl Value {
         Self::mk(r, c, d, Op::Leaf)
     }
 
-    pub fn parameter(r: usize, c: usize, s: &mut u64) -> Self {
+    pub fn parameter(r: usize, c: usize, seed: &mut u64) -> Self {
         let mut d = Vec::with_capacity(r * c);
         for _ in 0..r * c {
-            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let u = ((*s >> 32) as u32) as f32 / u32::MAX as f32;
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let u = ((*seed >> 32) as u32) as f32 / u32::MAX as f32;
             d.push((u - 0.5) * 0.05);
         }
         Self::leaf(r, c, d)
@@ -77,55 +77,56 @@ impl Value {
         self.0.borrow_mut().g.fill(0.0);
     }
 
-    pub fn set_data(&self, d: Vec<f32>) {
-        assert_eq!(d.len(), self.0.borrow().d.len());
-        self.0.borrow_mut().d = d;
+    pub fn set_data(&self, data: Vec<f32>) {
+        assert_eq!(data.len(), self.0.borrow().d.len(), "parameter length mismatch");
+        self.0.borrow_mut().d = data;
     }
 
-    pub fn add(&self, b: &Self) -> Self {
+    pub fn add(&self, rhs: &Self) -> Self {
+        assert_eq!(self.shape(), rhs.shape(), "add shape mismatch");
         let x = self.data();
-        let y = b.data();
-        assert_eq!(self.shape(), b.shape());
+        let y = rhs.data();
         Self::mk(
             self.shape().0,
             self.shape().1,
             x.iter().zip(y).map(|(a, b)| a + b).collect(),
-            Op::Add(self.clone(), b.clone()),
+            Op::Add(self.clone(), rhs.clone()),
         )
     }
 
-    pub fn mul(&self, b: &Self) -> Self {
+    pub fn mul(&self, rhs: &Self) -> Self {
+        assert_eq!(self.shape(), rhs.shape(), "mul shape mismatch");
         let x = self.data();
-        let y = b.data();
-        assert_eq!(self.shape(), b.shape());
+        let y = rhs.data();
         Self::mk(
             self.shape().0,
             self.shape().1,
             x.iter().zip(y).map(|(a, b)| a * b).collect(),
-            Op::Mul(self.clone(), b.clone()),
+            Op::Mul(self.clone(), rhs.clone()),
         )
     }
 
-    pub fn scalar_mul(&self, s: f32) -> Self {
+    pub fn scalar_mul(&self, scalar: f32) -> Self {
+        assert!(scalar.is_finite());
         self.mul(&Self::leaf(
             self.shape().0,
             self.shape().1,
-            vec![s; self.0.borrow().d.len()],
+            vec![scalar; self.data().len()],
         ))
     }
 
-    pub fn div_scalar(&self, s: f32) -> Self {
-        assert!(s.is_finite() && s != 0.0);
-        self.scalar_mul(1.0 / s)
+    pub fn div_scalar(&self, scalar: f32) -> Self {
+        assert!(scalar.is_finite() && scalar != 0.0);
+        self.scalar_mul(1.0 / scalar)
     }
 
-    pub fn matmul(&self, b: &Self) -> Self {
+    pub fn matmul(&self, rhs: &Self) -> Self {
         let (ar, ac) = self.shape();
-        let (br, bc) = b.shape();
+        let (br, bc) = rhs.shape();
         assert_eq!(ac, br, "matmul shape mismatch: {ar}x{ac} · {br}x{bc}");
         let x = self.data();
-        let y = b.data();
-        let mut o = vec![0.0; ar * bc];
+        let y = rhs.data();
+        let mut out = vec![0.0; ar * bc];
         for i in 0..ar {
             for k in 0..ac {
                 let a = x[i * ac + k];
@@ -133,33 +134,30 @@ impl Value {
                     continue;
                 }
                 for j in 0..bc {
-                    o[i * bc + j] += a * y[k * bc + j];
+                    out[i * bc + j] += a * y[k * bc + j];
                 }
             }
         }
-        Self::mk(ar, bc, o, Op::MatMul(self.clone(), b.clone()))
+        Self::mk(ar, bc, out, Op::MatMul(self.clone(), rhs.clone()))
     }
 
     pub fn transpose(&self) -> Self {
-        let (r, c) = self.shape();
+        let (rows, cols) = self.shape();
         let x = self.data();
-        let mut o = vec![0.0; r * c];
-        for i in 0..r {
-            for j in 0..c {
-                o[j * r + i] = x[i * c + j];
+        let mut out = vec![0.0; rows * cols];
+        for i in 0..rows {
+            for j in 0..cols {
+                out[j * rows + i] = x[i * cols + j];
             }
         }
-        Self::mk(c, r, o, Op::Transpose(self.clone()))
+        Self::mk(cols, rows, out, Op::Transpose(self.clone()))
     }
 
     pub fn log(&self) -> Self {
         Self::mk(
             self.shape().0,
             self.shape().1,
-            self.data()
-                .into_iter()
-                .map(|x| x.max(1e-20).ln())
-                .collect(),
+            self.data().into_iter().map(|x| x.max(1e-20).ln()).collect(),
             Op::Log(self.clone()),
         )
     }
@@ -186,104 +184,107 @@ impl Value {
         Self::mk(
             self.shape().0,
             self.shape().1,
-            self.data()
-                .into_iter()
-                .map(|x| x / (1.0 + (-x).exp()))
-                .collect(),
+            self.data().into_iter().map(|x| x / (1.0 + (-x).exp())).collect(),
             Op::Silu(self.clone()),
         )
     }
 
     pub fn softmax(&self) -> Self {
-        let (r, c) = self.shape();
-        assert_eq!(r, 1, "softmax currently expects a row vector");
+        let (rows, cols) = self.shape();
+        assert_eq!(rows, 1, "softmax expects a row vector");
         let x = self.data();
-        let m = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let e: Vec<f32> = x.iter().map(|v| (*v - m).exp()).collect();
-        let z = e.iter().sum::<f32>().max(1e-20);
+        let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exp: Vec<f32> = x.iter().map(|v| (*v - max).exp()).collect();
+        let sum = exp.iter().sum::<f32>().max(1e-20);
         Self::mk(
             1,
-            c,
-            e.into_iter().map(|v| v / z).collect(),
+            cols,
+            exp.into_iter().map(|v| v / sum).collect(),
             Op::Softmax(self.clone()),
         )
     }
 
     pub fn concat_rows(xs: &[Self]) -> Self {
         assert!(!xs.is_empty());
-        let c = xs[0].shape().1;
-        let mut d = Vec::new();
+        let cols = xs[0].shape().1;
+        let mut data = Vec::new();
         for x in xs {
-            assert_eq!(x.shape(), (1, c));
-            d.extend(x.data());
+            assert_eq!(x.shape(), (1, cols), "concat_rows shape mismatch");
+            data.extend(x.data());
         }
-        Self::mk(xs.len(), c, d, Op::ConcatRows(xs.to_vec()))
+        Self::mk(xs.len(), cols, data, Op::ConcatRows(xs.to_vec()))
     }
 
     pub fn concat_cols(xs: &[Self]) -> Self {
         assert!(!xs.is_empty());
-        let r = xs[0].shape().0;
-        let mut c = 0;
+        let rows = xs[0].shape().0;
+        let cols: usize = xs
+            .iter()
+            .map(|x| {
+                assert_eq!(x.shape().0, rows, "concat_cols row mismatch");
+                x.shape().1
+            })
+            .sum();
+        let mut out = vec![0.0; rows * cols];
+        let mut offset = 0;
         for x in xs {
-            assert_eq!(x.shape().0, r);
-            c += x.shape().1;
-        }
-        let mut o = vec![0.0; r * c];
-        let mut off = 0;
-        for x in xs {
-            let w = x.shape().1;
-            let d = x.data();
-            for i in 0..r {
-                for j in 0..w {
-                    o[i * c + off + j] = d[i * w + j];
-                }
+            let width = x.shape().1;
+            let data = x.data();
+            for i in 0..rows {
+                out[i * cols + offset..i * cols + offset + width]
+                    .copy_from_slice(&data[i * width..(i + 1) * width]);
             }
-            off += w;
+            offset += width;
         }
-        Self::mk(r, c, o, Op::ConcatCols(xs.to_vec()))
+        Self::mk(rows, cols, out, Op::ConcatCols(xs.to_vec()))
     }
 
     pub fn slice_cols(&self, start: usize, len: usize) -> Self {
-        let (r, c) = self.shape();
-        assert!(start + len <= c);
-        let d = self.data();
-        let mut o = Vec::with_capacity(r * len);
-        for i in 0..r {
-            o.extend_from_slice(&d[i * c + start..i * c + start + len]);
+        let (rows, cols) = self.shape();
+        assert!(start <= cols && len <= cols - start);
+        let data = self.data();
+        let mut out = Vec::with_capacity(rows * len);
+        for i in 0..rows {
+            out.extend_from_slice(&data[i * cols + start..i * cols + start + len]);
         }
-        Self::mk(r, len, o, Op::Slice(self.clone(), start, len))
+        Self::mk(rows, len, out, Op::Slice(self.clone(), start, len))
     }
 
-    pub fn gather(&self, i: usize) -> Self {
-        let (r, c) = self.shape();
-        assert_eq!(r, 1);
-        assert!(i < c);
-        Self::mk(1, 1, vec![self.data()[i]], Op::Gather(self.clone(), i))
+    pub fn gather(&self, index: usize) -> Self {
+        let (rows, cols) = self.shape();
+        assert_eq!(rows, 1, "gather expects a row vector");
+        assert!(index < cols);
+        Self::mk(1, 1, vec![self.data()[index]], Op::Gather(self.clone(), index))
     }
 
     pub fn row(&self, row: usize) -> Self {
-        let (r, c) = self.shape();
-        assert!(row < r);
-        let d = self.data();
-        Self::mk(1, c, d[row * c..(row + 1) * c].to_vec(), Op::RowGather(self.clone(), row))
+        let (rows, cols) = self.shape();
+        assert!(row < rows);
+        let data = self.data();
+        Self::mk(
+            1,
+            cols,
+            data[row * cols..(row + 1) * cols].to_vec(),
+            Op::RowGather(self.clone(), row),
+        )
     }
 
     pub fn backward(&self) {
-        let mut topo_order = Vec::new();
+        let mut order = Vec::new();
         let mut seen = HashSet::new();
-        topo(self, &mut seen, &mut topo_order);
+        topo(self, &mut seen, &mut order);
         self.0.borrow_mut().g.fill(1.0);
-        for v in topo_order.into_iter().rev() {
-            back(&v);
+        for node in order.into_iter().rev() {
+            back(&node);
         }
     }
 }
 
-fn topo(v: &Value, seen: &mut HashSet<usize>, order: &mut Vec<Value>) {
-    if !seen.insert(v.id()) {
+fn topo(value: &Value, seen: &mut HashSet<usize>, order: &mut Vec<Value>) {
+    if !seen.insert(value.id()) {
         return;
     }
-    match v.0.borrow().op.clone() {
+    match value.0.borrow().op.clone() {
         Op::Leaf => {}
         Op::Add(a, b) | Op::Mul(a, b) | Op::MatMul(a, b) => {
             topo(&a, seen, order);
@@ -304,29 +305,30 @@ fn topo(v: &Value, seen: &mut HashSet<usize>, order: &mut Vec<Value>) {
             }
         }
     }
-    order.push(v.clone());
+    order.push(value.clone());
 }
 
-fn ag(v: &Value, g: &[f32]) {
-    let mut n = v.0.borrow_mut();
-    for (dst, src) in n.g.iter_mut().zip(g) {
+fn accumulate(value: &Value, grad: &[f32]) {
+    let mut node = value.0.borrow_mut();
+    assert_eq!(node.g.len(), grad.len());
+    for (dst, src) in node.g.iter_mut().zip(grad) {
         *dst += *src;
     }
 }
 
-fn back(v: &Value) {
-    let g = v.grad();
-    match v.0.borrow().op.clone() {
+fn back(value: &Value) {
+    let grad = value.grad();
+    match value.0.borrow().op.clone() {
         Op::Leaf => {}
         Op::Add(a, b) => {
-            ag(&a, &g);
-            ag(&b, &g);
+            accumulate(&a, &grad);
+            accumulate(&b, &grad);
         }
         Op::Mul(a, b) => {
             let x = a.data();
             let y = b.data();
-            ag(&a, &g.iter().zip(&y).map(|(q, z)| q * z).collect::<Vec<_>>());
-            ag(&b, &g.iter().zip(&x).map(|(q, z)| q * z).collect::<Vec<_>>());
+            accumulate(&a, &grad.iter().zip(&y).map(|(g, y)| g * y).collect::<Vec<_>>());
+            accumulate(&b, &grad.iter().zip(&x).map(|(g, x)| g * x).collect::<Vec<_>>());
         }
         Op::MatMul(a, b) => {
             let (ar, ac) = a.shape();
@@ -338,102 +340,112 @@ fn back(v: &Value) {
             for i in 0..ar {
                 for k in 0..ac {
                     for j in 0..bc {
-                        let q = g[i * bc + j];
-                        ga[i * ac + k] += q * y[k * bc + j];
-                        gb[k * bc + j] += x[i * ac + k] * q;
+                        let g = grad[i * bc + j];
+                        ga[i * ac + k] += g * y[k * bc + j];
+                        gb[k * bc + j] += x[i * ac + k] * g;
                     }
                 }
             }
-            ag(&a, &ga);
-            ag(&b, &gb);
+            accumulate(&a, &ga);
+            accumulate(&b, &gb);
         }
         Op::Transpose(a) => {
-            let (out_r, out_c) = v.shape();
-            let mut q = vec![0.0; g.len()];
-            for i in 0..out_r {
-                for j in 0..out_c {
-                    q[j * out_r + i] = g[i * out_c + j];
+            let (out_rows, out_cols) = value.shape();
+            let mut ga = vec![0.0; grad.len()];
+            for i in 0..out_rows {
+                for j in 0..out_cols {
+                    ga[j * out_rows + i] = grad[i * out_cols + j];
                 }
             }
-            ag(&a, &q);
+            accumulate(&a, &ga);
         }
-        Op::Log(a) => ag(
-            &a,
-            &g.iter()
-                .zip(a.data())
-                .map(|(q, x)| q / x.max(1e-20))
-                .collect::<Vec<_>>(),
-        ),
-        Op::Neg(a) => ag(&a, &g.iter().map(|q| -q).collect::<Vec<_>>()),
-        Op::Relu(a) => ag(
-            &a,
-            &g.iter()
-                .zip(a.data())
-                .map(|(q, x)| if x > 0.0 { *q } else { 0.0 })
-                .collect::<Vec<_>>(),
-        ),
-        Op::Silu(a) => {
-            let x = a.data();
-            let gx = x
-                .iter()
-                .zip(&g)
-                .map(|(x, q)| {
-                    let s = 1.0 / (1.0 + (-x).exp());
-                    q * s * (1.0 + x * (1.0 - s))
-                })
-                .collect::<Vec<_>>();
-            ag(&a, &gx);
-        }
-        Op::Softmax(a) => {
-            let y = v.data();
-            let dot = g.iter().zip(&y).map(|(q, x)| q * x).sum::<f32>();
-            ag(
+        Op::Log(a) => {
+            let data = a.data();
+            accumulate(
                 &a,
-                &y.iter()
-                    .zip(g)
-                    .map(|(y, q)| y * (q - dot))
+                &grad
+                    .iter()
+                    .zip(data)
+                    .map(|(g, x)| g / x.max(1e-20))
                     .collect::<Vec<_>>(),
             );
         }
+        Op::Neg(a) => {
+            accumulate(&a, &grad.iter().map(|g| -g).collect::<Vec<_>>());
+        }
+        Op::Relu(a) => {
+            let data = a.data();
+            accumulate(
+                &a,
+                &grad
+                    .iter()
+                    .zip(data)
+                    .map(|(g, x)| if x > 0.0 { *g } else { 0.0 })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        Op::Silu(a) => {
+            let data = a.data();
+            let ga = data
+                .iter()
+                .zip(&grad)
+                .map(|(x, g)| {
+                    let s = 1.0 / (1.0 + (-x).exp());
+                    g * s * (1.0 + x * (1.0 - s))
+                })
+                .collect::<Vec<_>>();
+            accumulate(&a, &ga);
+        }
+        Op::Softmax(a) => {
+            let y = value.data();
+            let dot = grad.iter().zip(&y).map(|(g, y)| g * y).sum::<f32>();
+            let ga = y
+                .iter()
+                .zip(&grad)
+                .map(|(y, g)| y * (g - dot))
+                .collect::<Vec<_>>();
+            accumulate(&a, &ga);
+        }
         Op::ConcatRows(xs) => {
-            let c = v.shape().1;
-            for (i, x) in xs.iter().enumerate() {
-                ag(x, &g[i * c..(i + 1) * c]);
+            let cols = value.shape().1;
+            for (row, x) in xs.iter().enumerate() {
+                accumulate(x, &grad[row * cols..(row + 1) * cols]);
             }
         }
         Op::ConcatCols(xs) => {
-            let r = v.shape().0;
-            let c = v.shape().1;
-            let mut off = 0;
+            let rows = value.shape().0;
+            let cols = value.shape().1;
+            let mut offset = 0;
             for x in xs {
-                let w = x.shape().1;
-                let mut q = vec![0.0; r * w];
-                for i in 0..r {
-                    q[i * w..(i + 1) * w].copy_from_slice(&g[i * c + off..i * c + off + w]);
+                let width = x.shape().1;
+                let mut gx = vec![0.0; rows * width];
+                for row in 0..rows {
+                    gx[row * width..(row + 1) * width]
+                        .copy_from_slice(&grad[row * cols + offset..row * cols + offset + width]);
                 }
-                ag(&x, &q);
-                off += w;
+                accumulate(&x, &gx);
+                offset += width;
             }
         }
         Op::Slice(a, start, len) => {
-            let (r, c) = a.shape();
-            let mut q = vec![0.0; r * c];
-            for i in 0..r {
-                q[i * c + start..i * c + start + len]
-                    .copy_from_slice(&g[i * len..(i + 1) * len]);
+            let (rows, cols) = a.shape();
+            let mut ga = vec![0.0; rows * cols];
+            for row in 0..rows {
+                ga[row * cols + start..row * cols + start + len]
+                    .copy_from_slice(&grad[row * len..(row + 1) * len]);
             }
-            ag(&a, &q);
+            accumulate(&a, &ga);
         }
-        Op::Gather(a, i) => {
-            let mut q = vec![0.0; a.data().len()];
-            q[i] = g[0];
-            ag(&a, &q);
+        Op::Gather(a, index) => {
+            let mut ga = vec![0.0; a.data().len()];
+            ga[index] = grad[0];
+            accumulate(&a, &ga);
         }
         Op::RowGather(a, row) => {
-            let c = a.shape().1;
-            let mut q = vec![0.0; a.data().len()];
-            q[row * c..(row + 1) * c].copy_from_slice(g);
-            ag(&a, &q);
+            let cols = a.shape().1;
+            let mut ga = vec![0.0; a.data().len()];
+            ga[row * cols..(row + 1) * cols].copy_from_slice(&grad);
+            accumulate(&a, &ga);
         }
     }
 }
@@ -457,17 +469,25 @@ mod tests {
         let a = Value::leaf(2, 3, vec![1., 2., 3., 4., 5., 6.]);
         let y = a.transpose();
         y.backward();
-        assert_eq!(a.grad(), vec![1., 1., 1., 1., 1., 1.]);
+        assert_eq!(a.grad(), vec![1.; 6]);
     }
 
     #[test]
-    fn concat_cols_backward_for_matrix() {
+    fn concat_cols_matrix_backward() {
         let a = Value::leaf(2, 1, vec![1., 2.]);
         let b = Value::leaf(2, 2, vec![3., 4., 5., 6.]);
         let y = Value::concat_cols(&[a.clone(), b.clone()]);
         y.backward();
         assert_eq!(a.grad(), vec![1., 1.]);
         assert_eq!(b.grad(), vec![1., 1., 1., 1.]);
+    }
+
+    #[test]
+    fn slice_matrix_backward() {
+        let a = Value::leaf(2, 4, vec![1., 2., 3., 4., 5., 6., 7., 8.]);
+        let y = a.slice_cols(1, 2);
+        y.backward();
+        assert_eq!(a.grad(), vec![0., 1., 1., 0., 0., 1., 1., 0.]);
     }
 
     #[test]
@@ -481,13 +501,12 @@ mod tests {
     #[test]
     fn softmax_sums_to_one() {
         let y = Value::leaf(1, 3, vec![1., 2., 3.]).softmax();
-        let p = y.data();
-        let sum: f32 = p.iter().sum();
+        let sum: f32 = y.data().iter().sum();
         assert!((sum - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn silu_is_differentiable() {
+    fn silu_backward() {
         let x = Value::leaf(1, 1, vec![0.7]);
         let y = x.silu();
         y.backward();
