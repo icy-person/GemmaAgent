@@ -180,6 +180,18 @@ fn make_batch(
     Ok((xs, ys))
 }
 
+fn scheduled_lr(base_lr: f64, update: usize, total_updates: usize) -> f64 {
+    let warmup = 100usize.min(total_updates.max(1));
+    if update < warmup {
+        base_lr * (update + 1) as f64 / warmup as f64
+    } else {
+        let denom = (total_updates.saturating_sub(warmup)).max(1) as f64;
+        let progress = (update.saturating_sub(warmup)) as f64 / denom;
+        let cosine = 0.5 * (1.0 + (std::f64::consts::PI * progress.min(1.0)).cos());
+        base_lr * (0.1 + 0.9 * cosine)
+    }
+}
+
 pub fn train(
     steps: usize,
     checkpoint: &str,
@@ -215,7 +227,7 @@ pub fn train(
     let mut optimizer = AdamW::new(
         vars,
         ParamsAdamW {
-            lr,
+            lr: scheduled_lr(lr, 0, steps),
             beta1: 0.9,
             beta2: 0.95,
             eps: 1e-8,
@@ -226,6 +238,7 @@ pub fn train(
     let mut loss_total = 0.0f64;
     let mut last = Instant::now();
     for update in 0..steps {
+        optimizer.set_learning_rate(scheduled_lr(lr, update, steps));
         let mut grad_store = candle_core::backprop::GradStore::default();
         let mut update_loss = 0.0f64;
         for micro in 0..grad_accum {
@@ -249,9 +262,10 @@ pub fn train(
             let avg = loss_total / samples as f64;
             let tokens = (batch_size * cfg.context * grad_accum * samples) as f64;
             println!(
-                "gpu update {:5} loss {:.5} | {:.0} tok/s",
+                "gpu update {:5} loss {:.5} lr {:.7} | {:.0} tok/s",
                 update + 1,
                 avg,
+                scheduled_lr(lr, update, steps),
                 tokens / elapsed
             );
             loss_total = 0.0;
@@ -325,6 +339,16 @@ mod tests {
         assert!(!varmap.all_vars().is_empty());
         assert!(!grads.get_ids().collect::<Vec<_>>().is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn scheduler_starts_at_small_learning_rate() {
+        let first = scheduled_lr(3e-4, 0, 1000);
+        let peak = scheduled_lr(3e-4, 99, 1000);
+        let tail = scheduled_lr(3e-4, 999, 1000);
+        assert!(first < peak);
+        assert!(tail < peak);
+        assert!(tail > 0.0);
     }
 
     #[test]
