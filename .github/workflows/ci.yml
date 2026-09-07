@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  test:
+  runner-cpu:
+    name: Runner / CPU backend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,10 +14,29 @@ jobs:
         with:
           components: clippy
       # Keep CUDA out of the generic runner: candle/cudarc requires nvcc.
-      # Existing educational entrypoints intentionally expose a few unused
-      # helpers and a long argument list; don't turn those into CI failures.
-      - run: cargo clippy --all-targets -- -D warnings -A dead_code -A clippy::too-many-arguments -A clippy::unusual-byte-groupings
-      - run: cargo test --all-targets
-      - run: cargo build --release --bin cpu-train
-      # Compile-check the full AMD/Vulkan path separately.
+      - run: cargo clippy --all-targets --features runner-cpu -- -D warnings -A dead_code -A clippy::too-many-arguments -A clippy::unusual-byte-groupings
+      - run: cargo test --all-targets --features runner-cpu
+      - run: cargo build --release --features runner-cpu --bin cpu-train
+
+  laptop-amd-vulkan:
+    name: Laptop / AMD Vulkan backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
       - run: cargo check --all-targets --features amd-vulkan
+
+  android-vulkan:
+    name: Android / arm64 Vulkan backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Install Android Rust target
+        run: rustup target add aarch64-linux-android
+      - name: Check Android Vulkan inference
+        run: cargo check --target aarch64-linux-android --features android-vulkan --bin android-infer
