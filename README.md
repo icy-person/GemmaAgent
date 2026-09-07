@@ -13,10 +13,12 @@
 - positional encoding سینوسی بدون پارامتر اضافی
 - tokenizer بایتی با BOS/EOS
 - next-token cross-entropy
+- آموزش چندهدفهٔ causal از چند موقعیت داخل هر context window
 - AdamW با weight decay و bias correction
 - حلقهٔ آموزش واقعی CPU
 - آموزش از corpus داخلی یا فایل متن UTF-8 با `--data`
 - gradient accumulation قابل تنظیم برای batch مؤثر بزرگ‌تر
+- تعداد targetهای هر window با `--targets-per-step`
 - checkpoint باینری shape-safe و corruption-aware
 - checkpoint دوره‌ای در طول آموزش
 - runtime مستقل و مستقیم CPU برای inference
@@ -69,21 +71,21 @@ cargo run --release -- train 300
 آموزش از فایل متن UTF-8:
 
 ```bash
-cargo run --release -- train 5000 gemma-agent.ckpt --data ./train.txt --grad-accum 8 --checkpoint-every 250
+cargo run --release -- train 5000 gemma-agent.ckpt --data ./train.txt --grad-accum 8 --checkpoint-every 250 --targets-per-step 8
 ```
 
-فایل با tokenizer بایتی فعلی به BOS/EOS + byte IDs تبدیل می‌شود. بنابراین این قابلیت برای ادامهٔ توسعه و آزمایش pipeline واقعی است؛ برای یک مدل زبانی جدی، tokenizer subword/BPE باید در مرحلهٔ بعد اضافه شود.
+فایل با tokenizer بایتی فعلی به BOS/EOS + byte IDs تبدیل می‌شود. در هر window چند موقعیت causal به‌صورت هم‌زمان supervised می‌شوند و target خارج از انتهای window نیز حفظ می‌شود. این باعث می‌شود آموزش فقط به آخرین byte هر پنجره وابسته نباشد.
 
 برای batch مؤثر بزرگ‌تر و checkpoint دوره‌ای:
 
 ```bash
-cargo run --release -- train 10000 gemma-agent.ckpt --grad-accum 8 --checkpoint-every 100
+cargo run --release -- train 10000 gemma-agent.ckpt --grad-accum 8 --checkpoint-every 100 --targets-per-step 8
 ```
 
 آموزش پروفایل هدف:
 
 ```bash
-cargo run --release -- train 300 gemma-agent-target.ckpt --target --grad-accum 4 --checkpoint-every 25
+cargo run --release -- train 300 gemma-agent-target.ckpt --target --grad-accum 4 --checkpoint-every 25 --targets-per-step 4
 ```
 
 > هشدار: kernelهای آموزشی فعلی عمداً scalar و CPU-only هستند. بنابراین پروفایل ۱۹ میلیون پارامتری از نظر زمانی آموزشی مناسب توسعهٔ سریع نیست. هدف این نسخه، تثبیت correctness و architecture است.
@@ -110,7 +112,7 @@ cargo run --release -- infer gemma-agent.ckpt "Rust is" --temperature 0.8 --top-
 cargo run --release -- infer gemma-agent-target.ckpt "Rust is" --target --temperature 0.8 --top-k 40 --tokens 128
 ```
 
-`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--checkpoint-every 0` یا حذف این گزینه، checkpoint دوره‌ای را غیرفعال می‌کند. `--grad-accum 1` یعنی یک update برای هر window آموزشی.
+`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--checkpoint-every 0` یا حذف این گزینه، checkpoint دوره‌ای را غیرفعال می‌کند. `--grad-accum 1` یعنی یک update برای هر window آموزشی. `--targets-per-step 8` یعنی هشت موقعیت داخل window به‌علاوهٔ target بلافاصله بعد از window در loss وارد می‌شوند.
 
 ## Benchmark
 
@@ -126,6 +128,6 @@ cargo run --release -- bench --target --prompt-tokens 128 --tokens 64
 
 ## وضعیت مهندسی
 
-هستهٔ مدل و runtime مستقیم اکنون قابل تست و قابل بازتولید هستند. inference از graph autograd جدا شده و KV cache دارد، ولی runtime هنوز production-grade نیست. گام‌های بعدی عبارت‌اند از tokenizer subword/BPE، tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، RMSNorm، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
+هستهٔ مدل و runtime مستقیم اکنون قابل تست و قابل بازتولید هستند. inference از graph autograd جدا شده و KV cache دارد، و training supervision از یک target در هر window به چندین target causal ارتقا یافته است. runtime هنوز production-grade نیست. گام‌های بعدی عبارت‌اند از tokenizer subword/BPE، tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، RMSNorm، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
 
 CI فعلی compilation/lint و regression tests را روی Rust stable اجرا می‌کند.
