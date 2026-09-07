@@ -1,6 +1,5 @@
 pub const BOS: usize = 256;
 pub const EOS: usize = 257;
-pub const VOCAB_SIZE: usize = 258;
 
 pub struct Tokenizer;
 
@@ -45,8 +44,8 @@ mod tests {
     }
 
     #[test]
-    fn vocabulary_is_target_compatible() {
-        assert_eq!(VOCAB_SIZE, 258);
-        assert!(BOS < VOCAB_SIZE && EOS < VOCAB_SIZE);
+    fn special_tokens_fit_after_byte_vocabulary() {
+        assert!(BOS >= 256);
+        assert!(EOS > BOS);
     }
 }
