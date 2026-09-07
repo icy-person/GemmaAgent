@@ -5,21 +5,42 @@ edition="2024"
 authors=["icy-person"]
 description="A clean-room educational language model implemented in Rust"
 license="MIT"
+autobins=false
 
 [features]
 default=["runner-cpu"]
-# GitHub-hosted runner / portable scalar CPU backend.
 runner-cpu=[]
-# Desktop Linux AMD/Intel Vulkan backend through Burn + WGPU.
 amd-vulkan=["dep:burn","dep:burn-wgpu","burn/std","burn/autodiff","burn/wgpu","burn/fusion"]
-# Android arm64 Vulkan backend through the same Burn + WGPU engine.
 android-vulkan=["dep:burn","dep:burn-wgpu","burn/std","burn/autodiff","burn/wgpu","burn/fusion"]
-# The default is intentionally CPU for local/runner compatibility. Use
-# --no-default-features when selecting the GPU backend explicitly.
 
 [dependencies]
 burn={version="0.21.0",default-features=false,optional=true}
 burn-wgpu={version="0.21.0",default-features=false,optional=true}
+
+[[bin]]
+name="cpu-train"
+path="backend/cpu/bin/cpu-train.rs"
+required-features=["runner-cpu"]
+
+[[bin]]
+name="amd-train"
+path="backend/amd/bin/amd-train.rs"
+required-features=["amd-vulkan"]
+
+[[bin]]
+name="amd-bench"
+path="backend/amd/bin/amd-bench.rs"
+required-features=["amd-vulkan"]
+
+[[bin]]
+name="amd-infer"
+path="backend/amd/bin/amd-infer.rs"
+required-features=["amd-vulkan"]
+
+[[bin]]
+name="android-infer"
+path="backend/android/bin/android-infer.rs"
+required-features=["android-vulkan"]
 
 [profile.release]
 opt-level=3
