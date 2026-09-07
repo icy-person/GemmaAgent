@@ -11,6 +11,7 @@ use config::Config;
 use model::Model;
 use optim::AdamW;
 use runtime::RuntimeModel;
+use std::time::Instant;
 use tokenizer::Tokenizer;
 
 fn argmax(values: &[f32]) -> usize {
@@ -217,18 +218,56 @@ fn infer(
     println!("{}", tokenizer.decode(&tokens));
 }
 
+fn bench(cfg: Config, prompt_tokens: usize, generated_tokens: usize) {
+    assert!(prompt_tokens > 0 && generated_tokens > 0);
+    assert!(prompt_tokens + generated_tokens <= cfg.context);
+    let model = Model::new(cfg, 42);
+    let runtime = RuntimeModel::from_parameters(cfg, &model.parameters());
+    let tokens: Vec<usize> = (0..prompt_tokens)
+        .map(|i| 65 + (i % 26))
+        .collect();
+    let mut cache = runtime.new_cache();
+
+    let start = Instant::now();
+    let mut hidden = runtime.prime(&tokens, &mut cache);
+    let prefill_seconds = start.elapsed().as_secs_f64();
+
+    let decode_start = Instant::now();
+    let mut token = argmax(&runtime.logits(&hidden));
+    for _ in 0..generated_tokens {
+        hidden = runtime.next(token, &mut cache);
+        token = argmax(&runtime.logits(&hidden));
+    }
+    let decode_seconds = decode_start.elapsed().as_secs_f64();
+
+    println!(
+        "benchmark: {} params | prompt {} | generated {}",
+        cfg.params(), prompt_tokens, generated_tokens
+    );
+    println!(
+        "prefill: {:.3}s | {:.2} tok/s",
+        prefill_seconds,
+        prompt_tokens as f64 / prefill_seconds.max(f64::MIN_POSITIVE)
+    );
+    println!(
+        "decode:  {:.3}s | {:.2} tok/s",
+        decode_seconds,
+        generated_tokens as f64 / decode_seconds.max(f64::MIN_POSITIVE)
+    );
+}
+
 fn print_usage() {
     println!("GemmaAgent Rust LLM");
     println!("\nCommands:");
     println!("  cargo test");
     println!("  cargo run --release -- train 300 [checkpoint] [--target] [--checkpoint-every N] [--grad-accum N]");
-    println!(
-        "  cargo run --release -- infer [checkpoint] [prompt] [--target] [--tokens N] [--temperature T] [--top-k K]"
-    );
+    println!("  cargo run --release -- infer [checkpoint] [prompt] [--target] [--tokens N] [--temperature T] [--top-k K]");
+    println!("  cargo run --release -- bench [--target] [--prompt-tokens N] [--tokens N]");
     println!("\nDefault training profile is the small CPU-debug model.");
     println!("Use --target for the 19,275,776-parameter / context=1024 / 8-head profile.");
     println!("Gradient accumulation defaults to 1; larger values increase the effective batch without a larger graph.");
     println!("Inference uses a direct CPU runtime with KV cache; sampling defaults to greedy.");
+    println!("Benchmark reports prefill and incremental decode throughput for the current CPU runtime.");
 }
 
 fn main() {
@@ -267,6 +306,11 @@ fn main() {
                 temperature,
                 top_k,
             );
+        }
+        Some("bench") => {
+            let prompt_tokens = parse_usize_arg(&args, "--prompt-tokens", 32);
+            let generated_tokens = parse_usize_arg(&args, "--tokens", 32);
+            bench(config_from_args(&args), prompt_tokens, generated_tokens);
         }
         _ => print_usage(),
     }
