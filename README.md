@@ -5,72 +5,41 @@
 ## هستهٔ فعلی
 
 - reverse-mode Autograd با `matmul`, `transpose`, `softmax`, `log`, `gather`, row-gather و slicing
-- RMSNorm پارامتر-free با backward اختصاصی
-- گرادیان‌گیری برای SiLU و concatهای چندسطره
-- causal multi-head self-attention با 8 head در پروفایل هدف
+- RMSNorm پارامتر-free با backward اختصاصی در مسیر CPU
+- causal multi-head self-attention
 - decoder block با pre-norm، residual و feed-forward
 - SiLU در FFN
-- embedding مشترک ورودی/خروجی به‌صورت یک ماتریس واحد
-- positional encoding سینوسی بدون پارامتر اضافی
+- embedding مشترک ورودی/خروجی
+- positional encoding سینوسی در مسیر CPU
 - tokenizer بایتی با BOS/EOS
 - next-token cross-entropy
 - آموزش چندهدفهٔ causal از چند موقعیت داخل هر context window
-- AdamW با weight decay، bias correction و global gradient clipping
-- حلقهٔ آموزش واقعی CPU
-- آموزش از corpus داخلی یا فایل متن UTF-8 با `--data`
-- gradient accumulation قابل تنظیم برای batch مؤثر بزرگ‌تر
-- تعداد targetهای هر window با `--targets-per-step`
-- نرخ یادگیری قابل تنظیم با `--lr`
-- checkpoint باینری shape-safe و corruption-aware
-- checkpoint دوره‌ای در طول آموزش
-- runtime مستقل و مستقیم CPU برای inference
-- KV cache واقعی برای decoding افزایشی
-- autoregressive inference با greedy و sampling
-- sampling با `temperature` و `top-k` بدون dependency جدید
-- benchmark داخلی برای prefill و decode throughput
-- initialization قطعی برای بازتولیدپذیری
-- regression test برای برابری runtime مستقیم با forward مرجع و صحت incremental KV cache
+- AdamW با weight decay، bias correction و global gradient clipping در مسیر CPU
+- checkpoint باینری shape-safe و corruption-aware برای مسیر CPU
+- runtime مستقیم CPU و KV cache
+- greedy decoding و sampling با `temperature` و `top-k`
+- benchmark داخلی برای prefill/decode
+- **backend آموزشی CUDA اختیاری با Candle**
+- GPU autograd، RMSNorm، RoPE، dense causal attention، AdamW و batch training
+- GPU checkpoint با Safetensors
 
 ## پروفایل‌ها
 
-مدل کوچک برای تست سریع مسیر کامل:
+مدل کوچک CPU:
 
 `vocab=258 | context=128 | d_model=64 | layers=2 | heads=4 | ffn=128`
 
-مدل هدف:
+مدل هدف CPU:
 
 `vocab=16384 | context=1024 | d_model=416 | layers=6 | heads=8 | ffn=1664`
 
-فرمول شمارش پارامترها:
+فرمول شمارش پارامترهای وزن‌های اصلی:
 
 `vocab*d_model + layers*(4*d_model^2 + 2*d_model*ffn)`
 
-که برای پروفایل هدف دقیقاً `19,275,776` پارامتر است. در FP32 فقط وزن‌ها حدود `73.53 MiB` فضا می‌گیرند؛ activationها، گرادیان‌ها و state مربوط به AdamW جدا هستند.
+که برای پروفایل هدف `19,275,776` پارامتر است. مسیر GPU به‌دلیل RMSNormهای قابل‌آموزش gainهای اضافی دارد.
 
-نکته: tokenizer فعلی بایتی است و فقط 258 شناسهٔ واقعی تولید می‌کند؛ vocab بزرگ‌تر در پروفایل هدف عمداً برای آزمایش معماری و پارامترشمارش نگه داشته شده است.
-
-## اجرا
-
-تست‌ها:
-
-```bash
-cargo test
-```
-
-lint و regression CI:
-
-```bash
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-```
-
-آموزش سریع با corpus داخلی:
-
-```bash
-cargo run --release -- train 300
-```
-
-آموزش پیشنهادی از فایل متن UTF-8:
+## آموزش CPU
 
 ```bash
 cargo run --release -- train 5000 gemma-agent.ckpt \
@@ -81,59 +50,88 @@ cargo run --release -- train 5000 gemma-agent.ckpt \
   --checkpoint-every 250
 ```
 
-فایل با tokenizer بایتی فعلی به BOS/EOS + byte IDs تبدیل می‌شود. در هر window چند موقعیت causal به‌صورت هم‌زمان supervised می‌شوند و target خارج از انتهای window نیز حفظ می‌شود.
+## آموزش GPU / CUDA
 
-برای دادهٔ خیلی کوچک و تست overfit، می‌توان targetها را متراکم‌تر کرد:
+Backend GPU با Candle 0.11 پیاده شده است. Candle برای Rust backendهای CPU/CUDA و backpropagation دارد و candle-nn نیز AdamW، RMSNorm، RoPE و عملیات attention را ارائه می‌کند. citeturn687109search2turn170084search0turn170084search1turn912734search0
+
+ابتدا بررسی کن کارت NVIDIA و driver دیده می‌شوند:
 
 ```bash
-cargo run --release -- train 10000 gemma-agent.ckpt \
+nvidia-smi
+```
+
+سپس training را روی GPU صفر اجرا کن:
+
+```bash
+cargo run --release --features cuda --bin gpu-train -- \
+  --steps 5000 \
   --data ./train.txt \
-  --grad-accum 4 \
-  --targets-per-step 64 \
-  --lr 0.001 \
-  --checkpoint-every 250
+  --checkpoint gemma-agent-gpu.safetensors \
+  --batch-size 8 \
+  --lr 0.0003 \
+  --checkpoint-every 250 \
+  --gpu 0
 ```
 
-آموزش پروفایل هدف:
+در این مسیر loss روی تمام موقعیت‌های `context` محاسبه می‌شود؛ بنابراین آموزش، next-token objective متراکم واقعی دارد. `batch-size` تعداد windowهای هم‌زمان روی GPU را تعیین می‌کند.
+
+برای GPU با حافظه محدود:
 
 ```bash
-cargo run --release -- train 300 gemma-agent-target.ckpt \
-  --target --grad-accum 4 --targets-per-step 4 \
-  --lr 0.0005 --checkpoint-every 25
+--batch-size 2
 ```
 
-> هشدار: kernelهای آموزشی فعلی عمداً scalar و CPU-only هستند. بنابراین پروفایل ۱۹ میلیون پارامتری از نظر زمانی آموزشی مناسب توسعهٔ سریع نیست. هدف این نسخه، تثبیت correctness و architecture است.
-
-## Inference
-
-Inference checkpoint را به runtime مستقیم CPU منتقل می‌کند؛ graph مربوط به autograd در هر token ساخته نمی‌شود و KV cache برای decoding افزایشی نگهداری می‌شود.
-
-Greedy:
+یا:
 
 ```bash
-cargo run --release -- infer gemma-agent.ckpt "Rust is"
+--batch-size 4
 ```
 
-Sampling:
+برای throughput بیشتر، `8` یا بالاتر را تا سقف حافظهٔ کارت افزایش بده.
+
+### GPU benchmark
 
 ```bash
-cargo run --release -- infer gemma-agent.ckpt "Rust is" --temperature 0.8 --top-k 40 --tokens 128
+cargo run --release --features cuda --bin gpu-bench -- \
+  --batch-size 8 \
+  --context 128 \
+  --iterations 100 \
+  --gpu 0
 ```
 
-برای پروفایل هدف باید همان فلگ `--target` را در inference هم بدهید.
+## چرا CUDA اختیاری است؟
 
-`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--grad-accum 1` یعنی یک update برای هر window آموزشی. `--targets-per-step 32` یعنی ۳۲ موقعیت داخل window به‌علاوهٔ target بلافاصله بعد از window در loss وارد می‌شوند.
+نسخهٔ عادی پروژه بدون CUDA همچنان با Rust stable ساخته می‌شود. برای GPU باید feature `cuda` فعال شود. candle-core و candle-nn هر دو feature رسمی CUDA دارند. citeturn463911search0turn463911search4
 
-## Benchmark
+## معماری GPU
+
+مسیر GPU برای training از نظر پایداری و کیفیت یک مرحله جلوتر از kernel سادهٔ CPU است:
+
+- embedding و output projection مشترک
+- pre-norm با RMSNorm قابل‌آموزش
+- RoPE برای موقعیت
+- causal multi-head self-attention
+- SiLU FFN
+- dense next-token loss روی تمام موقعیت‌ها
+- batch training واقعی روی GPU
+- AdamW با `beta1=0.9`, `beta2=0.95`, `weight_decay=0.1`
+- checkpoint در قالب Safetensors
+
+برای training از نسخه‌های slow/graph-based عملیات RoPE در جاهایی که به gradient نیاز است استفاده شده تا مسیر backward حفظ شود؛ APIهای Candle این عملیات را روی همان device اجرا می‌کنند. citeturn912734search1turn734540search0
+
+## Inference CPU
 
 ```bash
-cargo run --release -- bench
-cargo run --release -- bench --prompt-tokens 128 --tokens 64
-cargo run --release -- bench --target --prompt-tokens 128 --tokens 64
+cargo run --release -- infer gemma-agent.ckpt "Rust is" \
+  --temperature 0.8 \
+  --top-k 40 \
+  --tokens 128
 ```
 
-خروجی، زمان و token/s برای prefill و incremental decode را جداگانه گزارش می‌کند.
+## Checkpoint
+
+`gemma-agent.ckpt` مربوط به مسیر CPU است و `gemma-agent-gpu.safetensors` مربوط به مدل GPU. این دو checkpoint format مشترک ندارند.
 
 ## وضعیت مهندسی
 
-هستهٔ مدل و runtime مستقیم قابل تست و بازتولید هستند. training اکنون pre-norm RMSNorm، supervision چندهدفه و gradient clipping دارد. tokenizer هنوز byte-level است و runtime هنوز production-grade نیست. گام‌های بعدی عبارت‌اند از tokenizer subword/BPE، tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
+مسیر CPU برای correctness و آموزش از پایه حفظ شده است. مسیر CUDA اکنون training واقعی tensor-level روی GPU، autograd، RMSNorm، RoPE و batch loss متراکم دارد. مرحلهٔ بعدی برای کیفیت مدل شامل tokenizer BPE/subword، dataset بزرگ و تمیز، mixed precision، flash/fused attention، memory planning و سپس runtime GPU با KV cache است.
