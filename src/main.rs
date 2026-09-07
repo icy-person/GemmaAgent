@@ -34,7 +34,7 @@ fn config_from_args(args: &[String]) -> Config {
     }
 }
 
-fn train(steps: usize, path: &str, cfg: Config) {
+fn train(steps: usize, path: &str, cfg: Config, checkpoint_every: usize) {
     cfg.validate();
     let tokenizer = Tokenizer::new();
     let encoded = tokenizer.encode(&tokenizer::tiny_corpus());
@@ -52,6 +52,9 @@ fn train(steps: usize, path: &str, cfg: Config) {
     );
     if cfg == Config::target() {
         println!("target profile selected; scalar CPU training is intentionally slow");
+    }
+    if checkpoint_every > 0 {
+        println!("periodic checkpoints: every {checkpoint_every} steps -> {path}");
     }
 
     let model = Model::new(cfg, 42);
@@ -76,6 +79,10 @@ fn train(steps: usize, path: &str, cfg: Config) {
 
         if step == 1 || step % 25 == 0 || step == steps {
             println!("step {step:4} loss {value:.5}");
+        }
+        if checkpoint_every > 0 && step < steps && step % checkpoint_every == 0 {
+            checkpoint::save(path, &parameters).expect("failed to save periodic checkpoint");
+            println!("checkpoint: {path} (step {step})");
         }
     }
 
@@ -194,12 +201,13 @@ fn print_usage() {
     println!("GemmaAgent Rust LLM");
     println!("\nCommands:");
     println!("  cargo test");
-    println!("  cargo run --release -- train 300 [checkpoint] [--target]");
+    println!("  cargo run --release -- train 300 [checkpoint] [--target] [--checkpoint-every N]");
     println!(
         "  cargo run --release -- infer [checkpoint] [prompt] [--target] [--tokens N] [--temperature T] [--top-k K]"
     );
     println!("\nDefault training profile is the small CPU-debug model.");
     println!("Use --target for the 19,275,776-parameter / context=1024 / 8-head profile.");
+    println!("Periodic checkpointing is disabled by default; set --checkpoint-every 100 for long runs.");
     println!("Inference defaults to greedy decoding (temperature <= 0.000001). Set --temperature 0.8 for sampling.");
 }
 
@@ -212,7 +220,8 @@ fn main() {
                 .get(3)
                 .map(String::as_str)
                 .unwrap_or("gemma-agent.ckpt");
-            train(steps, path, config_from_args(&args));
+            let checkpoint_every = parse_usize_arg(&args, "--checkpoint-every", 0);
+            train(steps, path, config_from_args(&args), checkpoint_every);
         }
         Some("infer") => {
             let path = args
