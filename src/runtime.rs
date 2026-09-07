@@ -72,16 +72,11 @@ impl RuntimeModel {
     fn matvec(rows: usize, cols: usize, weight: &[f32], x: &[f32]) -> Vec<f32> {
         assert_eq!(weight.len(), rows * cols);
         assert_eq!(x.len(), cols);
-        let mut out = vec![0.0; rows];
-        for r in 0..rows {
-            let base = r * cols;
-            let mut sum = 0.0;
-            for c in 0..cols {
-                sum += weight[base + c] * x[c];
-            }
-            out[r] = sum;
-        }
-        out
+        weight
+            .chunks_exact(cols)
+            .take(rows)
+            .map(|row| row.iter().zip(x).map(|(a, b)| a * b).sum())
+            .collect()
     }
 
     fn project_into(&self, weight: &[f32], x: &[f32]) -> Vec<f32> {
