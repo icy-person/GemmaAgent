@@ -39,7 +39,7 @@ fn parse_string(args: &[String], name: &str, default: &str) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("GemmaAgent AMD Vulkan trainer\n\nUsage:\n  cargo run --release --features amd-vulkan --bin amd-train -- [--target] --steps 5000 --data ./train.txt --checkpoint gemma-agent-amd.bin\n\nOptions:\n  --target               use the 19M-parameter configuration\n  --steps N              optimizer updates (default 5000)\n  --data FILE            UTF-8 training corpus (default ./train.txt)\n  --checkpoint FILE      Burn binary model checkpoint\n  --batch-size N         windows per GPU batch (default 4)\n  --grad-accum N         micro-batches per optimizer update (default 2)\n  --lr X                 base AdamW learning rate (default 0.0003)\n  --checkpoint-every N   save every N updates (default 250)\n  --gpu N                discrete GPU ordinal (default 0)\n");
+        println!("GemmaAgent AMD Vulkan trainer\n\nUsage:\n  cargo run --release --features amd-vulkan --bin amd-train -- [--target] --steps 5000 --data ./train.txt --checkpoint gemma-agent-amd.bin\n\nOptions:\n  --target               use the 19M-parameter configuration\n  --steps N              optimizer updates (default 5000)\n  --data FILE            UTF-8 training corpus (default ./train.txt)\n  --checkpoint FILE      Burn binary model checkpoint\n  --batch-size N         windows per GPU batch (default 4)\n  --grad-accum N         micro-batches per optimizer update (default 2)\n  --lr X                 base AdamW learning rate (default 0.0003)\n  --checkpoint-every N   save every N updates (default 250)\n  --gpu-kind K           integrated, discrete, or best (default integrated)\n  --gpu N                GPU ordinal (default 0)\n");
         return;
     }
 
@@ -55,6 +55,7 @@ fn main() {
     let grad_accum = parse_usize(&args, "--grad-accum", 2);
     let checkpoint_every = parse_usize(&args, "--checkpoint-every", 250);
     let gpu_index = parse_usize(&args, "--gpu", 0);
+    let gpu_kind = parse_string(&args, "--gpu-kind", "integrated");
     let lr = parse_f64(&args, "--lr", 0.0003);
 
     amd::train(
@@ -67,6 +68,7 @@ fn main() {
         lr,
         checkpoint_every,
         gpu_index,
+        &gpu_kind,
     );
 }
 
