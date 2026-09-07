@@ -11,7 +11,7 @@ on:
         default: "ubuntu-latest"
         type: string
       stage_steps:
-        description: "Optimizer steps per curriculum stage"
+        description: "Optimizer updates per curriculum stage"
         required: true
         default: "100"
         type: string
@@ -26,14 +26,14 @@ on:
         default: "8"
         type: string
       targets_per_step:
-        description: "Token positions sampled from each context"
+        description: "Random token positions sampled from each context"
         required: true
-        default: "64"
+        default: "128"
         type: string
       eval_samples:
         description: "Held-out validation windows after each stage"
         required: true
-        default: "8"
+        default: "16"
         type: string
 
   schedule:
@@ -125,12 +125,14 @@ jobs:
           STAGE_STEPS="${{ inputs.stage_steps || '100' }}"
           RUNTIME_MINUTES="${{ inputs.runtime_minutes || '330' }}"
           GRAD_ACCUM="${{ inputs.grad_accum || '8' }}"
-          TARGETS_PER_STEP="${{ inputs.targets_per_step || '64' }}"
-          EVAL_SAMPLES="${{ inputs.eval_samples || '8' }}"
+          TARGETS_PER_STEP="${{ inputs.targets_per_step || '128' }}"
+          EVAL_SAMPLES="${{ inputs.eval_samples || '16' }}"
           DEADLINE=$(( $(date +%s) + RUNTIME_MINUTES * 60 ))
           CHECKPOINT="checkpoints/gemma-agent.cpu.ckpt"
+          TOKENIZER="checkpoints/gemma-agent.cpu.ckpt.tok"
           LOG="run-report/training.log"
           stage=0
+          goal_reached=0
 
           while (( $(date +%s) < DEADLINE )); do
             stage=$((stage + 1))
@@ -149,15 +151,15 @@ jobs:
               --data "$DATA"
               --val-data data/val.txt
               --checkpoint "$CHECKPOINT"
+              --tokenizer "$TOKENIZER"
+              --train-context 512
               --grad-accum "$GRAD_ACCUM"
               --targets-per-step "$TARGETS_PER_STEP"
               --eval-samples "$EVAL_SAMPLES"
               --lr "$LR"
               --checkpoint-every 25)
 
-            if [[ -s "$CHECKPOINT" ]]; then
-              CMD+=(--resume "$CHECKPOINT")
-            fi
+            if [[ -s "$CHECKPOINT" ]]; then CMD+=(--resume "$CHECKPOINT"); fi
 
             set +e
             "${CMD[@]}" 2>&1 | tee -a "$LOG"
@@ -165,29 +167,18 @@ jobs:
             set -e
 
             if [[ "$rc" -ne 0 ]]; then
-              if [[ -s "$CHECKPOINT" ]]; then
-                echo "Resume failed; checkpoint is incompatible/corrupt. Removing it and restarting this stage with the large profile." | tee -a "$LOG"
-                rm -f "$CHECKPOINT"
-                ./target/release/cpu-train --large \
-                  --steps "$STAGE_STEPS" \
-                  --data "$DATA" \
-                  --val-data data/val.txt \
-                  --checkpoint "$CHECKPOINT" \
-                  --grad-accum "$GRAD_ACCUM" \
-                  --targets-per-step "$TARGETS_PER_STEP" \
-                  --eval-samples "$EVAL_SAMPLES" \
-                  --lr "$LR" \
-                  --checkpoint-every 25 2>&1 | tee -a "$LOG"
-              else
-                echo "Training stage failed without a checkpoint; stopping so the run fails loudly." | tee -a "$LOG"
-                exit "$rc"
-              fi
+              echo "Training stage failed with exit code $rc" | tee -a "$LOG"
+              exit "$rc"
             fi
 
             last_val="$(grep 'validation_loss=' "$LOG" | tail -n 1 | sed -n 's/.*validation_loss=\([0-9.]*\).*/\1/p')"
             if [[ -n "$last_val" ]]; then
               echo "latest_validation_loss=$last_val" | tee -a "$LOG"
-              awk "BEGIN { if ($last_val < 1.0) exit 0; else exit 1 }" && echo "GOAL_REACHED: validation loss < 1.0" | tee -a "$LOG" || true
+              if awk "BEGIN { exit !($last_val < 1.0) }"; then
+                echo "GOAL_REACHED: validation loss < 1.0" | tee -a "$LOG"
+                goal_reached=1
+                break
+              fi
             fi
           done
 
@@ -195,14 +186,16 @@ jobs:
           commit=${GITHUB_SHA}
           run_id=${GITHUB_RUN_ID}
           runner=${RUNNER_NAME}
-          profile=large-49,725,440-parameters
+          profile=large-49,807,360-parameters
           runtime_minutes=${RUNTIME_MINUTES}
           stage_steps=${STAGE_STEPS}
           grad_accum=${GRAD_ACCUM}
           targets_per_step=${TARGETS_PER_STEP}
           eval_samples=${EVAL_SAMPLES}
+          train_context=512
           curriculum=01-literature,02-code,03-math,04-reasoning,05-balanced
           goal=validation_loss_below_1.0
+          goal_reached=${goal_reached}
           EOF
 
       - name: Upload checkpoint and metrics
@@ -215,5 +208,8 @@ jobs:
           overwrite: true
           path: |
             checkpoints/gemma-agent.cpu.ckpt
+            checkpoints/gemma-agent.cpu.ckpt.opt
+            checkpoints/gemma-agent.cpu.ckpt.state
+            checkpoints/gemma-agent.cpu.ckpt.tok
             run-report/
             data/corpus_manifest.json
