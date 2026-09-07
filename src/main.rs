@@ -36,8 +36,15 @@ fn config_from_args(args: &[String]) -> Config {
     }
 }
 
-fn train(steps: usize, path: &str, cfg: Config, checkpoint_every: usize) {
+fn train(
+    steps: usize,
+    path: &str,
+    cfg: Config,
+    checkpoint_every: usize,
+    grad_accum: usize,
+) {
     cfg.validate();
+    assert!(grad_accum > 0, "gradient accumulation must be at least 1");
     let tokenizer = Tokenizer::new();
     let encoded = tokenizer.encode(&tokenizer::tiny_corpus());
     assert!(
@@ -52,6 +59,7 @@ fn train(steps: usize, path: &str, cfg: Config, checkpoint_every: usize) {
     if cfg == Config::target() {
         println!("target profile selected; scalar CPU training is intentionally slow");
     }
+    println!("gradient accumulation: {grad_accum}");
     if checkpoint_every > 0 {
         println!("periodic checkpoints: every {checkpoint_every} steps -> {path}");
     }
@@ -61,6 +69,8 @@ fn train(steps: usize, path: &str, cfg: Config, checkpoint_every: usize) {
     let mut optimizer = AdamW::new(if cfg == Config::target() { 0.0005 } else { 0.002 });
 
     let window_count = encoded.len() - cfg.context;
+    let mut accumulated = 0usize;
+    let mut loss_sum = 0.0f32;
     for step in 1..=steps {
         let start = (step - 1) % window_count;
         let loss = cross_entropy(
@@ -69,12 +79,20 @@ fn train(steps: usize, path: &str, cfg: Config, checkpoint_every: usize) {
             encoded[start + cfg.context],
         );
         let value = loss.data()[0];
-        loss.backward();
-        optimizer.step(&parameters);
+        loss_sum += value;
+        accumulated += 1;
 
-        if step == 1 || step % 25 == 0 || step == steps {
-            println!("step {step:4} loss {value:.5}");
+        let backward_loss = loss.div_scalar(grad_accum as f32);
+        backward_loss.backward();
+
+        if accumulated == grad_accum || step == steps {
+            optimizer.step(&parameters);
+            let mean_loss = loss_sum / accumulated as f32;
+            println!("update {:4} (step {step:4}) mean_loss {mean_loss:.5}", step / grad_accum);
+            accumulated = 0;
+            loss_sum = 0.0;
         }
+
         if checkpoint_every > 0 && step < steps && step % checkpoint_every == 0 {
             checkpoint::save(path, &parameters).expect("failed to save periodic checkpoint");
             println!("checkpoint: {path} (step {step})");
@@ -179,8 +197,7 @@ fn infer(
     assert!(!tokens.is_empty(), "prompt must contain at least one token");
     assert!(tokens.len() <= cfg.context, "prompt exceeds configured context");
 
-    let hidden = runtime.prime(&tokens, &mut cache);
-    let mut logits = runtime.logits(&hidden);
+    let mut logits = runtime.logits(&runtime.prime(&tokens, &mut cache));
     let mut rng_state = 0x9E37_79B9_7F4A_7C15u64;
     for _ in 0..max_new_tokens {
         let next = if temperature <= 1e-6 {
@@ -189,14 +206,10 @@ fn infer(
             sample_token(&logits, temperature, top_k, &mut rng_state)
         };
         tokens.push(next);
-        if next == tokenizer::EOS {
+        if next == tokenizer::EOS || tokens.len() >= cfg.context {
             break;
         }
-        if tokens.len() >= cfg.context {
-            break;
-        }
-        let hidden = runtime.next(next, &mut cache);
-        logits = runtime.logits(&hidden);
+        logits = runtime.logits(&runtime.next(next, &mut cache));
     }
     println!("{}", tokenizer.decode(&tokens));
 }
@@ -205,13 +218,13 @@ fn print_usage() {
     println!("GemmaAgent Rust LLM");
     println!("\nCommands:");
     println!("  cargo test");
-    println!("  cargo run --release -- train 300 [checkpoint] [--target] [--checkpoint-every N]");
+    println!("  cargo run --release -- train 300 [checkpoint] [--target] [--checkpoint-every N] [--grad-accum N]");
     println!(
         "  cargo run --release -- infer [checkpoint] [prompt] [--target] [--tokens N] [--temperature T] [--top-k K]"
     );
     println!("\nDefault training profile is the small CPU-debug model.");
     println!("Use --target for the 19,275,776-parameter / context=1024 / 8-head profile.");
-    println!("Periodic checkpointing is disabled by default; set --checkpoint-every 100 for long runs.");
+    println!("Gradient accumulation defaults to 1; larger values increase the effective batch without a larger graph.");
     println!("Inference uses a direct CPU runtime with KV cache; sampling defaults to greedy.");
 }
 
@@ -225,7 +238,14 @@ fn main() {
                 .map(String::as_str)
                 .unwrap_or("gemma-agent.ckpt");
             let checkpoint_every = parse_usize_arg(&args, "--checkpoint-every", 0);
-            train(steps, path, config_from_args(&args), checkpoint_every);
+            let grad_accum = parse_usize_arg(&args, "--grad-accum", 1);
+            train(
+                steps,
+                path,
+                config_from_args(&args),
+                checkpoint_every,
+                grad_accum,
+            );
         }
         Some("infer") => {
             let path = args
