@@ -1,0 +1,164 @@
+name: Train GemmaAgent
+
+on:
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: "Number of optimizer updates"
+        required: true
+        default: "50000"
+        type: string
+      batch_size:
+        description: "Micro-batch size"
+        required: true
+        default: "1"
+        type: string
+      grad_accum:
+        description: "Gradient accumulation steps"
+        required: true
+        default: "8"
+        type: string
+      learning_rate:
+        description: "Initial learning rate"
+        required: true
+        default: "0.0003"
+        type: string
+      gpu_util:
+        description: "GPU duty-cycle limiter (0-100). 100 disables the limiter."
+        required: true
+        default: "100"
+        type: string
+      runner:
+        description: "GitHub Actions runner label. Use ubuntu-latest, or self-hosted for an AMD GPU runner."
+        required: true
+        default: "ubuntu-latest"
+        type: string
+      checkpoint_every:
+        description: "Save checkpoint every N updates"
+        required: true
+        default: "1000"
+        type: string
+      eval_every:
+        description: "Evaluate every N updates"
+        required: true
+        default: "500"
+        type: string
+
+concurrency:
+  group: gemmaagent-training-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  train:
+    name: Train on ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends python3 ca-certificates pkg-config libvulkan1 mesa-vulkan-drivers vulkan-tools
+          fi
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-amd-vulkan-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-amd-vulkan-
+
+      - name: Prepare real corpus
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 scripts/prepare_real_corpus.py
+          test -s data/train.txt
+          test -s data/val.txt
+          test -s data/corpus_manifest.json
+          wc -c data/train.txt data/val.txt
+
+      - name: Inspect Vulkan runtime
+        shell: bash
+        run: |
+          set +e
+          vulkaninfo --summary
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "Vulkan summary is unavailable; Burn/WGPU may fall back to another backend."
+          fi
+
+      - name: Build AMD/Vulkan trainer
+        run: cargo build --release --bin amd-train --features amd-vulkan
+
+      - name: Train
+        env:
+          RUST_BACKTRACE: "1"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p checkpoints
+          ./target/release/amd-train \
+            --target \
+            --steps "${{ inputs.steps }}" \
+            --data ./data/train.txt \
+            --checkpoint ./checkpoints/gemma-agent.bin \
+            --best-checkpoint ./checkpoints/gemma-agent.best \
+            --tokenizer ./checkpoints/gemma-agent.tok \
+            --batch-size "${{ inputs.batch_size }}" \
+            --grad-accum "${{ inputs.grad_accum }}" \
+            --lr "${{ inputs.learning_rate }}" \
+            --checkpoint-every "${{ inputs.checkpoint_every }}" \
+            --eval-every "${{ inputs.eval_every }}" \
+            --gpu-kind best \
+            --gpu-util "${{ inputs.gpu_util }}" 2>&1 | tee training.log
+
+      - name: Collect metrics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p run-report
+          cp -f training.log run-report/training.log
+          cp -f data/corpus_manifest.json run-report/corpus_manifest.json
+          grep -E "loss|Loss|perplex|Perplex|step" training.log > run-report/metrics.txt || true
+          cat > run-report/run-info.txt <<EOF
+          commit=${GITHUB_SHA}
+          runner=${RUNNER_NAME}
+          os=${RUNNER_OS}
+          steps=${{ inputs.steps }}
+          batch_size=${{ inputs.batch_size }}
+          grad_accum=${{ inputs.grad_accum }}
+          learning_rate=${{ inputs.learning_rate }}
+          gpu_util=${{ inputs.gpu_util }}
+          EOF
+
+      - name: Upload training artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemmaagent-training-${{ github.run_number }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            checkpoints/
+            run-report/
+            data/corpus_manifest.json
