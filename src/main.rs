@@ -3,12 +3,14 @@ mod checkpoint;
 mod config;
 mod model;
 mod optim;
+mod runtime;
 mod tokenizer;
 
 use autograd::Value;
 use config::Config;
 use model::Model;
 use optim::AdamW;
+use runtime::RuntimeModel;
 use tokenizer::Tokenizer;
 
 fn argmax(values: &[f32]) -> usize {
@@ -45,10 +47,7 @@ fn train(steps: usize, path: &str, cfg: Config, checkpoint_every: usize) {
 
     println!(
         "GemmaAgent: {} params | context {} | {} heads | {:.2} MiB fp32",
-        cfg.params(),
-        cfg.context,
-        cfg.heads,
-        cfg.approx_parameter_memory_mb()
+        cfg.params(), cfg.context, cfg.heads, cfg.approx_parameter_memory_mb()
     );
     if cfg == Config::target() {
         println!("target profile selected; scalar CPU training is intentionally slow");
@@ -59,11 +58,7 @@ fn train(steps: usize, path: &str, cfg: Config, checkpoint_every: usize) {
 
     let model = Model::new(cfg, 42);
     let parameters = model.parameters();
-    let mut optimizer = AdamW::new(if cfg == Config::target() {
-        0.0005
-    } else {
-        0.002
-    });
+    let mut optimizer = AdamW::new(if cfg == Config::target() { 0.0005 } else { 0.002 });
 
     let window_count = encoded.len() - cfg.context;
     for step in 1..=steps {
@@ -167,8 +162,8 @@ fn infer(
 ) {
     cfg.validate();
     let tokenizer = Tokenizer::new();
-    let model = Model::new(cfg, 42);
-    let parameters = model.parameters();
+    let autograd_model = Model::new(cfg, 42);
+    let parameters = autograd_model.parameters();
 
     if !std::path::Path::new(path).exists() {
         eprintln!("checkpoint not found: {path}");
@@ -177,13 +172,17 @@ fn infer(
     }
     checkpoint::load(path, &parameters).expect("failed to load checkpoint");
 
+    let runtime = RuntimeModel::from_parameters(cfg, &parameters);
+    let mut cache = runtime.new_cache();
     let mut tokens = tokenizer.encode(prompt);
     let _ = tokens.pop();
+    assert!(!tokens.is_empty(), "prompt must contain at least one token");
+    assert!(tokens.len() <= cfg.context, "prompt exceeds configured context");
+
+    let hidden = runtime.prime(&tokens, &mut cache);
+    let mut logits = runtime.logits(&hidden);
     let mut rng_state = 0x9E37_79B9_7F4A_7C15u64;
     for _ in 0..max_new_tokens {
-        let start = tokens.len().saturating_sub(cfg.context);
-        let hidden = model.forward_hidden(&tokens[start..]);
-        let logits = model.logits(&hidden).data();
         let next = if temperature <= 1e-6 {
             argmax(&logits)
         } else {
@@ -193,6 +192,11 @@ fn infer(
         if next == tokenizer::EOS {
             break;
         }
+        if tokens.len() >= cfg.context {
+            break;
+        }
+        let hidden = runtime.next(next, &mut cache);
+        logits = runtime.logits(&hidden);
     }
     println!("{}", tokenizer.decode(&tokens));
 }
@@ -208,7 +212,7 @@ fn print_usage() {
     println!("\nDefault training profile is the small CPU-debug model.");
     println!("Use --target for the 19,275,776-parameter / context=1024 / 8-head profile.");
     println!("Periodic checkpointing is disabled by default; set --checkpoint-every 100 for long runs.");
-    println!("Inference defaults to greedy decoding (temperature <= 0.000001). Set --temperature 0.8 for sampling.");
+    println!("Inference uses a direct CPU runtime with KV cache; sampling defaults to greedy.");
 }
 
 fn main() {
