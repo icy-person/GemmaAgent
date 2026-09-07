@@ -33,7 +33,7 @@
 - SwiGLU feed-forward
 - gradient accumulation با GradientsAccumulator
 - KV-cache واقعی برای prefill و incremental decoding
-- نرمال‌سازی اصلاح‌شدهٔ sampled CPU loss، طوری که loss دقیقاً بر تعداد مثال‌های واقعاً مصرف‌شده تقسیم می‌شود
+- نرمال‌سازی صحیح sampled CPU loss، طوری که loss دقیقاً بر تعداد targetهای واقعاً مصرف‌شده تقسیم می‌شود
 
 ## پروفایل‌ها
 
@@ -66,6 +66,57 @@ cargo run --release --no-default-features --features runner-cpu --bin cpu-train 
 ```
 
 checkpoint کامل شامل وزن، optimizer state، RNG و tokenizer است. trainer از checkpoint قبلی resume می‌کند و loss sampled را با تعداد واقعی targetها نرمال می‌کند.
+
+## آموزش با اینترنت و corpus آنلاین
+
+Pipeline آموزشی اکنون یک مرحلهٔ آنلاین دارد که از **Wikimedia/Wikipedia** دادهٔ متنی می‌گیرد. این جمع‌آوری یک crawler آزاد نیست؛ دامنه و API مشخص است، درخواست‌ها rate-limited هستند، داده cache می‌شود و برای هر صفحه title، URL، revision id، hash و license داخل `data/online_manifest.json` ثبت می‌شود. برای درخواست‌های ماشینی به Wikimedia، User-Agent توصیفی و رعایت throttling ضروری است. urlراهنمای API Policy و User-Agent و TextExtractshttps://meta.wikimedia.org/wiki/API_Policy_Update_2024/en
+
+اجرای محلی:
+
+```bash
+python3 scripts/prepare_online_corpus.py \
+  --pages-per-topic 12 \
+  --max-pages 160 \
+  --min-chars 300 \
+  --delay 0.35
+```
+
+خروجی:
+
+```text
+data/online/train.txt
+data/online/val.txt
+data/online/pages/
+data/online_manifest.json
+```
+
+برای ساخت tokenizer اولیه، pipeline ترکیبی از corpus آفلاین و آنلاین را به `data/bootstrap.txt` می‌سازد. بعد از ساخته‌شدن tokenizer، همان tokenizer از checkpoint ادامه پیدا می‌کند و تغییرات وزن مدل روی مرحلهٔ آنلاین نیز اعمال می‌شود.
+
+چرخهٔ آموزش GitHub Actions شامل این مراحل است:
+
+`bootstrap -> literature -> code -> math -> reasoning -> balanced -> online-wikipedia -> repeat`
+
+مرحلهٔ آنلاین از `data/online/train.txt` و validation متناظر خودش استفاده می‌کند؛ بنابراین مدل فقط روی دادهٔ آنلاین train نمی‌شود و دچار drift شدید به سمت یک منبع واحد نمی‌شود.
+
+اجرای دستی یک دور آنلاین:
+
+```bash
+cargo run --release --no-default-features --features runner-cpu --bin cpu-train -- \
+  --large \
+  --steps 500 \
+  --data data/online/train.txt \
+  --val-data data/online/val.txt \
+  --checkpoint checkpoints/gemma-agent.cpu.ckpt \
+  --tokenizer checkpoints/gemma-agent.cpu.ckpt.tok \
+  --resume checkpoints/gemma-agent.cpu.ckpt \
+  --train-context 512 \
+  --grad-accum 8 \
+  --targets-per-step 128 \
+  --eval-samples 16 \
+  --lr 0.00006
+```
+
+دادهٔ آنلاین به‌صورت artifact نیز کنار checkpoint ذخیره می‌شود تا اجرای بعدی بتواند cache را بازیابی کند. خود corpus generated در git commit نمی‌شود.
 
 ## Laptop / AMD Vulkan
 
@@ -172,6 +223,8 @@ cargo check --target aarch64-linux-android --no-default-features --features andr
 
 روی لپ‌تاپ 8GB RAM، `batch-size=1` نقطهٔ شروع امن است و `grad-accum` برای افزایش batch مؤثر استفاده می‌شود. backend Vulkan فعلاً F32 است تا correctness و پایداری اولویت داشته باشند.
 
+در مسیر CPU، `targets-per-step` هزینهٔ هر forward/backward را کنترل می‌کند. برای شروع پایدار `128` مناسب است؛ اگر زمان هر update زیاد شد، این عدد را پایین بیاور و با `grad-accum` تعداد updateهای مؤثر را حفظ کن.
+
 ## کیفیت مدل
 
 فناوری backend به‌تنهایی مدل را باهوش نمی‌کند. کیفیت بیشتر به corpus تمیز و بزرگ، tokenizer مناسب، تعداد token کافی، validation صحیح و آموزش طولانی وابسته است. رسیدن به validation loss زیر 1 روی corpus کوچک ممکن است صرفاً نشانهٔ memorization باشد و نباید به‌عنوان تضمین توانایی عمومی مدل تفسیر شود.
@@ -186,6 +239,8 @@ CI سه مسیر را مستقل بررسی می‌کند:
 
 همچنین CI یک build با دو backend هم‌زمان را عمداً امتحان می‌کند و انتظار دارد `build.rs` آن را رد کند. GitHub-hosted runner سخت‌افزار Radeon یا GPU موبایل کاربر را شبیه‌سازی نمی‌کند؛ بنابراین benchmark نهایی باید روی دستگاه واقعی انجام شود.
 
+Workflow آموزش CPU نیز به اینترنت متصل است، corpus آنلاین را refresh می‌کند، manifest آن را validate می‌کند و سپس مرحلهٔ `online-wikipedia` را در curriculum اجرا می‌کند.
+
 ## وضعیت فعلی
 
-پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. هر build فقط یک backend runtime دارد، backendهای GPU بر پایهٔ Vulkan هستند، GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند و هر دو دارای **RoPE + native SDPA + SwiGLU + KV-cache** هستند.
+پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. هر build فقط یک backend runtime دارد، backendهای GPU بر پایهٔ Vulkan هستند، GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند، و pipeline آموزش CPU اکنون علاوه بر corpus آفلاین از یک corpus آنلاینِ قابل‌ردیابی و cache‌شده نیز استفاده می‌کند.
