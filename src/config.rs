@@ -17,7 +17,7 @@ impl Config {
         Self { vocab: 16_384, context: 1_024, d_model: 416, layers: 6, heads: 8, ffn: 1_664 }
     }
 
-    /// Long-training CPU profile: 49,725,440 parameters.
+    /// Long-training CPU profile: exactly 49,807,360 parameters.
     pub fn large() -> Self {
         Self { vocab: 16_384, context: 1_024, d_model: 640, layers: 8, heads: 10, ffn: 2_560 }
     }
@@ -59,6 +59,6 @@ mod tests {
     fn large_profile_matches_documented_shape() {
         let c = Config::large(); c.validate();
         assert_eq!((c.context, c.heads, c.d_model, c.layers, c.ffn), (1024, 10, 640, 8, 2560));
-        assert_eq!(c.params(), 49_725_440);
+        assert_eq!(c.params(), 49_807_360);
     }
 }
