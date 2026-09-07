@@ -82,13 +82,16 @@ fn train(
         loss_sum += value;
         accumulated += 1;
 
-        let backward_loss = loss.div_scalar(grad_accum as f32);
-        backward_loss.backward();
+        let divisor = if step == steps { accumulated } else { grad_accum };
+        loss.div_scalar(divisor as f32).backward();
 
         if accumulated == grad_accum || step == steps {
             optimizer.step(&parameters);
             let mean_loss = loss_sum / accumulated as f32;
-            println!("update {:4} (step {step:4}) mean_loss {mean_loss:.5}", step / grad_accum);
+            println!(
+                "update {:4} (step {step:4}) mean_loss {mean_loss:.5}",
+                optimizer.timestep()
+            );
             accumulated = 0;
             loss_sum = 0.0;
         }
