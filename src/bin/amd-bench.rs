@@ -18,10 +18,19 @@ fn parse_usize(args: &[String], name: &str, default: usize) -> usize {
 }
 
 #[cfg(feature = "amd-vulkan")]
+fn parse_string(args: &[String], name: &str, default: &str) -> String {
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| default.to_owned())
+}
+
+#[cfg(feature = "amd-vulkan")]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: cargo run --release --features amd-vulkan --bin amd-bench -- [--target] --batch-size 4 --context 128 --iterations 100 --gpu 0");
+        println!("Usage: cargo run --release --features amd-vulkan --bin amd-bench -- [--target] --batch-size 4 --context 128 --iterations 100 --gpu-kind integrated --gpu 0");
         return;
     }
     let cfg = if args.iter().any(|a| a == "--target") {
@@ -33,7 +42,8 @@ fn main() {
     let context = parse_usize(&args, "--context", 128);
     let iterations = parse_usize(&args, "--iterations", 100);
     let gpu = parse_usize(&args, "--gpu", 0);
-    amd::benchmark(cfg, gpu, batch_size, context, iterations);
+    let gpu_kind = parse_string(&args, "--gpu-kind", "integrated");
+    amd::benchmark(cfg, gpu, &gpu_kind, batch_size, context, iterations);
 }
 
 #[cfg(not(feature = "amd-vulkan"))]
