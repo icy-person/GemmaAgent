@@ -1,4 +1,4 @@
-#![cfg(feature = "amd-vulkan")]
+#![cfg(any(feature = "amd-vulkan", feature = "android-vulkan"))]
 
 use burn::{
     backend::Autodiff,
@@ -580,7 +580,7 @@ pub fn train(
     let val_tokens = &encoded[split.saturating_sub(cfg.context)..];
     assert!(train_tokens.len() > cfg.context + 1 && val_tokens.len() > cfg.context + 1);
     let warmup = (steps / 20).max(20).min(steps);
-    println!("AMD Vulkan: Burn WGPU native SDPA + RoPE + SwiGLU + KV-cache");
+    println!("WGPU Vulkan: Burn native SDPA + RoPE + SwiGLU + KV-cache");
     println!(
         "GPU={gpu_kind}:{gpu_index} | params={} | vocab={} ctx={} d_model={} layers={} heads={} ffn={}",
         model.num_params(),
@@ -632,7 +632,6 @@ pub fn train(
         assert!(!grads.is_empty(), "no gradients reached optimizer");
         model = optimizer.step(current_lr, model, grads);
 
-        // Force completion of the Vulkan queue before measuring the work interval.
         let _sync = Tensor::<AmdBase, 1>::zeros([1], &device).sum().into_scalar();
         throttle_gpu_duty_cycle(update_start, gpu_util);
 
@@ -714,7 +713,7 @@ pub fn benchmark(
     }
     let seconds = start.elapsed().as_secs_f64().max(1e-9);
     println!(
-        "AMD Vulkan forward {}:{}, {:.0} tok/s | params={}",
+        "WGPU Vulkan forward {}:{}, {:.0} tok/s | params={}",
         gpu_kind,
         gpu_index,
         (batch_size * context * iterations) as f64 / seconds,
