@@ -1,6 +1,8 @@
 name: Train GemmaAgent CPU
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       runner:
@@ -49,7 +51,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Python
+      - name: Install Python and helper tools
         shell: bash
         run: |
           set -euxo pipefail
