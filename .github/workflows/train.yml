@@ -1,167 +1,179 @@
-name: Train GemmaAgent
+name: Train GemmaAgent CPU
 
 on:
   workflow_dispatch:
     inputs:
-      steps:
-        description: "Number of optimizer updates"
+      runner:
+        description: "Runner label"
         required: true
-        default: "50000"
+        default: "ubuntu-latest"
         type: string
-      batch_size:
-        description: "Micro-batch size"
+      stage_steps:
+        description: "Optimizer steps per curriculum stage"
         required: true
-        default: "1"
+        default: "200"
+        type: string
+      runtime_minutes:
+        description: "Train continuously for this many minutes"
+        required: true
+        default: "330"
         type: string
       grad_accum:
         description: "Gradient accumulation steps"
         required: true
         default: "8"
         type: string
-      learning_rate:
-        description: "Initial learning rate"
+      targets_per_step:
+        description: "Token positions sampled from each context"
         required: true
-        default: "0.0003"
-        type: string
-      gpu_util:
-        description: "GPU duty-cycle limiter (0-100). 100 disables the limiter."
-        required: true
-        default: "100"
-        type: string
-      runner:
-        description: "GitHub Actions runner label. Use ubuntu-latest, or self-hosted for an AMD GPU runner."
-        required: true
-        default: "ubuntu-latest"
-        type: string
-      checkpoint_every:
-        description: "Save checkpoint every N updates"
-        required: true
-        default: "1000"
-        type: string
-      eval_every:
-        description: "Evaluate every N updates"
-        required: true
-        default: "500"
+        default: "32"
         type: string
 
+  schedule:
+    - cron: "0 0,6,12,18 * * *"
+
 concurrency:
-  group: gemmaagent-training-${{ github.ref }}
+  group: gemmaagent-cpu-training
   cancel-in-progress: false
 
 jobs:
   train:
-    name: Train on ${{ inputs.runner }}
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: 360
+    name: Continuous CPU curriculum training
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 355
     permissions:
       contents: read
+      actions: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies on Ubuntu runners
-        if: runner.os == 'Linux'
+      - name: Install Python
         shell: bash
         run: |
           set -euxo pipefail
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends python3 ca-certificates pkg-config libvulkan1 mesa-vulkan-drivers vulkan-tools
-          else
-            echo "apt-get not available; assuming the self-hosted runner already has Python/Vulkan prerequisites."
+            sudo apt-get install -y --no-install-recommends python3 ca-certificates curl jq
           fi
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
+      - name: Restore latest checkpoint artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p checkpoints
+          previous_run="$(gh run list --workflow train.yml --limit 20 --json databaseId --jq ".[] | select(.databaseId != ${GITHUB_RUN_ID}) | .databaseId" | head -n 1 || true)"
+          if [[ -n "$previous_run" ]]; then
+            echo "Trying previous training run: $previous_run"
+            if gh run download "$previous_run" --name gemmaagent-cpu-checkpoint --dir checkpoints; then
+              find checkpoints -maxdepth 2 -type f -print
+            else
+              echo "No downloadable previous checkpoint; starting fresh."
+            fi
+          fi
 
-      - name: Cache Rust build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-amd-vulkan-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-amd-vulkan-
-
-      - name: Prepare real corpus
+      - name: Prepare public corpus and curriculum
         shell: bash
         run: |
           set -euxo pipefail
           python3 scripts/prepare_real_corpus.py
+          python3 scripts/prepare_curriculum.py
           test -s data/train.txt
           test -s data/val.txt
-          test -s data/corpus_manifest.json
-          wc -c data/train.txt data/val.txt
+          test -s data/curriculum/01-literature.txt
+          test -s data/curriculum/02-code.txt
+          test -s data/curriculum/03-math.txt
+          test -s data/curriculum/04-reasoning.txt
+          test -s data/curriculum/05-balanced.txt
 
-      - name: Inspect Vulkan runtime
-        shell: bash
-        run: |
-          set +e
-          vulkaninfo --summary
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ]; then
-            echo "Vulkan summary is unavailable; Burn/WGPU may fall back to another backend."
-          fi
+      - name: Build optimized CPU trainer
+        run: cargo build --release --bin cpu-train
 
-      - name: Build AMD/Vulkan trainer
-        run: cargo build --release --bin amd-train --features amd-vulkan
-
-      - name: Train
+      - name: Continuous curriculum training
         env:
           RUST_BACKTRACE: "1"
         shell: bash
         run: |
-          set -euxo pipefail
-          mkdir -p checkpoints
-          ./target/release/amd-train \
-            --target \
-            --steps "${{ inputs.steps }}" \
-            --data ./data/train.txt \
-            --checkpoint ./checkpoints/gemma-agent.bin \
-            --best-checkpoint ./checkpoints/gemma-agent.best \
-            --tokenizer ./checkpoints/gemma-agent.tok \
-            --batch-size "${{ inputs.batch_size }}" \
-            --grad-accum "${{ inputs.grad_accum }}" \
-            --lr "${{ inputs.learning_rate }}" \
-            --checkpoint-every "${{ inputs.checkpoint_every }}" \
-            --eval-every "${{ inputs.eval_every }}" \
-            --gpu-kind best \
-            --gpu-util "${{ inputs.gpu_util }}" 2>&1 | tee training.log
+          set -u
+          mkdir -p checkpoints run-report
+          STAGE_STEPS="${{ inputs.stage_steps || '200' }}"
+          RUNTIME_MINUTES="${{ inputs.runtime_minutes || '330' }}"
+          GRAD_ACCUM="${{ inputs.grad_accum || '8' }}"
+          TARGETS_PER_STEP="${{ inputs.targets_per_step || '32' }}"
+          DEADLINE=$(( $(date +%s) + RUNTIME_MINUTES * 60 ))
+          CHECKPOINT="checkpoints/gemma-agent.cpu.ckpt"
+          LOG="run-report/training.log"
+          stage=0
+          while (( $(date +%s) < DEADLINE )); do
+            stage=$((stage + 1))
+            case $((stage % 5)) in
+              1) DOMAIN="01-literature"; LR="0.00020" ;;
+              2) DOMAIN="02-code";       LR="0.00012" ;;
+              3) DOMAIN="03-math";       LR="0.00015" ;;
+              4) DOMAIN="04-reasoning";  LR="0.00010" ;;
+              0) DOMAIN="05-balanced";   LR="0.00008" ;;
+            esac
+            DATA="data/curriculum/${DOMAIN}.txt"
+            echo "===== curriculum stage ${stage}: ${DOMAIN}, lr=${LR} =====" | tee -a "$LOG"
 
-      - name: Collect metrics
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          mkdir -p run-report
-          cp -f training.log run-report/training.log
-          cp -f data/corpus_manifest.json run-report/corpus_manifest.json
-          grep -E "loss|Loss|perplex|Perplex|step" training.log > run-report/metrics.txt || true
+            if [[ -s "$CHECKPOINT" ]]; then
+              set +e
+              ./target/release/cpu-train \
+                --target \
+                --steps "$STAGE_STEPS" \
+                --data "$DATA" \
+                --checkpoint "$CHECKPOINT" \
+                --resume "$CHECKPOINT" \
+                --grad-accum "$GRAD_ACCUM" \
+                --targets-per-step "$TARGETS_PER_STEP" \
+                --lr "$LR" \
+                --checkpoint-every 100 \
+                2>&1 | tee -a "$LOG"
+              rc=${PIPESTATUS[0]}
+              set -e
+              if [[ "$rc" -ne 0 ]]; then
+                echo "Resume failed; discarding incompatible checkpoint and restarting this stage." | tee -a "$LOG"
+                rm -f "$CHECKPOINT"
+              else
+                continue
+              fi
+            fi
+
+            ./target/release/cpu-train \
+              --target \
+              --steps "$STAGE_STEPS" \
+              --data "$DATA" \
+              --checkpoint "$CHECKPOINT" \
+              --grad-accum "$GRAD_ACCUM" \
+              --targets-per-step "$TARGETS_PER_STEP" \
+              --lr "$LR" \
+              --checkpoint-every 100 \
+              2>&1 | tee -a "$LOG"
+          done
+
           cat > run-report/run-info.txt <<EOF
           commit=${GITHUB_SHA}
+          run_id=${GITHUB_RUN_ID}
           runner=${RUNNER_NAME}
-          os=${RUNNER_OS}
-          steps=${{ inputs.steps }}
-          batch_size=${{ inputs.batch_size }}
-          grad_accum=${{ inputs.grad_accum }}
-          learning_rate=${{ inputs.learning_rate }}
-          gpu_util=${{ inputs.gpu_util }}
+          runtime_minutes=${RUNTIME_MINUTES}
+          stage_steps=${STAGE_STEPS}
+          grad_accum=${GRAD_ACCUM}
+          targets_per_step=${TARGETS_PER_STEP}
+          curriculum=01-literature,02-code,03-math,04-reasoning,05-balanced
           EOF
 
-      - name: Upload training artifacts
+      - name: Upload checkpoint and metrics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gemmaagent-training-${{ github.run_number }}
+          name: gemmaagent-cpu-checkpoint
           if-no-files-found: warn
           retention-days: 14
+          overwrite: true
           path: |
-            checkpoints/
+            checkpoints/gemma-agent.cpu.ckpt
             run-report/
             data/corpus_manifest.json
