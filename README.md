@@ -7,7 +7,8 @@
 - reverse-mode Autograd در مسیر CPU
 - causal multi-head self-attention
 - decoder block و FFN با SiLU
-- tokenizer بایتی با BOS/EOS
+- tokenizer بایتی با BOS/EOS برای مسیر CPU
+- tokenizer هدف AMD با subwordهای آموخته‌شده از corpus و byte fallback
 - next-token cross-entropy
 - آموزش چندهدفهٔ causal در مسیر CPU
 - AdamW و global gradient clipping در مسیر CPU
@@ -15,9 +16,13 @@
 - runtime مستقیم CPU و KV cache برای inference
 - sampling با `temperature` و `top-k`
 - backend آموزشی CUDA اختیاری با Candle
-- backend آموزشی **AMD/Vulkan** اختیاری با Burn + WGPU
+- backend آموزشی **AMD/Vulkan** با Burn + WGPU
 - GPU autograd، pre-norm transformer و dense causal next-token loss
 - GPU batch training و gradient accumulation
+- curriculum context برای شروع سریع‌تر و انتقال تدریجی به context کامل
+- random window sampling برای کاهش هم‌پوشانی و تکرار داده
+- train/validation split و validation perplexity
+- best-checkpoint و latest-checkpoint جداگانه
 - warmup + cosine learning-rate schedule
 - GPU checkpoint با Burn binary recorder
 
@@ -31,7 +36,7 @@
 
 `vocab=16384 | context=1024 | d_model=416 | layers=6 | heads=8 | ffn=1664`
 
-پروفایل هدف CPU در وزن‌های اصلی دقیقاً `19,275,776` پارامتر دارد. backendهای GPU شامل embedding موقعیت، normalization و output head مستقل هستند، بنابراین شمارش پارامتر GPU دقیقاً برابر با عدد CPU نیست.
+پروفایل هدف CPU در وزن‌های اصلی دقیقاً `19,275,776` پارامتر دارد. backend AMD شامل embedding موقعیت، normalization و output head مستقل است، بنابراین شمارش پارامتر GPU دقیقاً برابر با عدد CPU نیست.
 
 ## آموزش CPU
 
@@ -66,7 +71,7 @@ cargo run --release --features cuda --bin gpu-train -- \
 
 ## آموزش AMD / Vulkan
 
-برای GPUهای AMD روی لینوکس، مسیر اصلی پروژه **Burn + WGPU + Vulkan** است. Burn 0.21، Autodiff و AdamW و Transformer را ارائه می‌کند و burn-wgpu، WGPU را برای backendهای GPU در اختیار می‌گذارد. WGPU در لینوکس می‌تواند از Vulkan استفاده کند و `WgpuDevice` انتخاب `IntegratedGpu` و `DiscreteGpu` را فراهم می‌کند. citeturn137906search0turn137906search1turn137906search3turn137906search7
+برای GPUهای AMD روی لینوکس، مسیر اصلی پروژه **Burn + WGPU + Vulkan** است. این پروژه فعلاً Burn `0.20.1` را پین می‌کند تا مسیر optimizer به نسخه‌ای با ریسک regression شناخته‌شده در `0.21.0` وابسته نباشد. WGPU در این مسیر می‌تواند Vulkan را به‌کار بگیرد و device مجتمع یا مستقل را انتخاب کند. citeturn176319search0turn120file0
 
 ابتدا:
 
@@ -86,7 +91,48 @@ cargo run --release --features amd-vulkan --bin amd-bench -- \
   --gpu 0
 ```
 
-### آموزش مدل کوچک
+### آموزش مدل هدف — تنظیم پیشنهادی برای iGPU با 8GB RAM
+
+```bash
+cargo run --release --features amd-vulkan --bin amd-train -- \
+  --target \
+  --steps 20000 \
+  --data ./train.txt \
+  --checkpoint gemma-agent-target-amd.bin \
+  --best-checkpoint gemma-agent-target-amd.bin.best \
+  --tokenizer gemma-agent-target-amd.bin.tok \
+  --batch-size 1 \
+  --grad-accum 1 \
+  --lr 0.0003 \
+  --checkpoint-every 250 \
+  --eval-every 250 \
+  --gpu-kind integrated \
+  --gpu 0
+```
+
+در اولین اجرا، tokenizer هدف از خود `train.txt` ساخته و در فایل `.tok` ذخیره می‌شود؛ اجرای مجدد از همان tokenizer استفاده می‌کند تا IDهای توکن با وزن‌های مدل جابه‌جا نشوند.
+
+آموزش هدف با سه مرحلهٔ context انجام می‌شود: شروع با 256، سپس 512 و در پایان 1024. این کار هزینهٔ محاسباتی ابتدای آموزش را پایین می‌آورد و در انتهای آموزش مدل را روی context کامل تثبیت می‌کند.
+
+`--resume` فقط وزن‌های checkpoint قبلی را برمی‌گرداند و وضعیت optimizer فعلاً از صفر شروع می‌شود:
+
+```bash
+cargo run --release --features amd-vulkan --bin amd-train -- \
+  --target \
+  --steps 20000 \
+  --data ./train.txt \
+  --checkpoint gemma-agent-target-amd.bin \
+  --resume gemma-agent-target-amd.bin \
+  --batch-size 1 \
+  --grad-accum 1 \
+  --lr 0.0003 \
+  --checkpoint-every 250 \
+  --eval-every 250 \
+  --gpu-kind integrated \
+  --gpu 0
+```
+
+### آموزش مدل کوچک برای تست pipeline
 
 ```bash
 cargo run --release --features amd-vulkan --bin amd-train -- \
@@ -94,32 +140,15 @@ cargo run --release --features amd-vulkan --bin amd-train -- \
   --data ./train.txt \
   --checkpoint gemma-agent-amd.bin \
   --batch-size 2 \
-  --grad-accum 2 \
+  --grad-accum 1 \
   --lr 0.0003 \
   --checkpoint-every 250 \
+  --eval-every 250 \
   --gpu-kind integrated \
   --gpu 0
 ```
 
 `integrated` برای iGPUهای Radeon مناسب است. برای کارت مستقل AMD از `--gpu-kind discrete` استفاده کن؛ `--gpu-kind best` هم اجازه می‌دهد WGPU بهترین device موجود را انتخاب کند.
-
-### آموزش مدل هدف
-
-```bash
-cargo run --release --features amd-vulkan --bin amd-train -- \
-  --target \
-  --steps 5000 \
-  --data ./train.txt \
-  --checkpoint gemma-agent-target-amd.bin \
-  --batch-size 1 \
-  --grad-accum 1 \
-  --lr 0.0003 \
-  --checkpoint-every 100 \
-  --gpu-kind integrated \
-  --gpu 0
-```
-
-مدل هدف با `context=1024` و attention متراکم حافظهٔ قابل‌توجهی می‌خواهد؛ روی iGPU بهتر است با `batch-size=1` و `grad-accum=1` شروع شود.
 
 ## معماری AMD
 
@@ -134,13 +163,21 @@ cargo run --release --features amd-vulkan --bin amd-train -- \
 - RMSNorm نهایی
 - output projection بدون bias
 - dense next-token loss روی تمام موقعیت‌های context
+- random windows + train/validation split
+- context curriculum: `256 -> 512 -> 1024`
 - batch واقعی روی WGPU/Vulkan
-- gradient accumulation با یک graph تجمیعی
+- gradient accumulation
 - AdamW با `beta1=0.9`, `beta2=0.95`, `weight_decay=0.1`
 - warmup + cosine LR
-- Burn binary checkpoint
+- latest + best Burn binary checkpoint
 
-این backend از معماری آموزشی CPU جداست تا مسیر tensor-level واقعی روی GPU داشته باشد. GPU trainer فعلاً F32 است؛ mixed precision و fused attention عمداً بعد از تثبیت correctness اضافه خواهند شد.
+برای پروفایل هدف، tokenizer دیگر byte-only نیست: corpus به یک واژگان subword آموزش‌دیده با byte fallback تبدیل می‌شود تا ظرفیت 16,384 خروجی واقعاً استفاده شود. این تغییر برای کیفیت مدل مهم است، چون داشتن یک output head شانزده‌هزارکلاسه در حالی که فقط 258 ID تولید می‌شود، بخش بزرگی از ظرفیت خروجی را بلااستفاده می‌گذارد.
+
+این backend از معماری آموزشی CPU جداست تا مسیر tensor-level واقعی روی GPU داشته باشد. GPU trainer فعلاً F32 است؛ mixed precision و fused attention بعد از تثبیت correctness و benchmark واقعی این سخت‌افزار اضافه خواهند شد.
+
+## صحت optimizer
+
+نسخهٔ Burn `0.21.0` یک گزارش upstream دربارهٔ no-op شدن `Optimizer::step` برای مدل‌های `#[derive(Module)]` دارد؛ در همان گزارش `Param::map` به‌عنوان workaround مؤثر ثبت شده است. بنابراین این مخزن فعلاً `0.20.1` را استفاده می‌کند و trainer علاوه بر آن، قبل از optimizer step وجود gradient را به‌صورت صریح بررسی می‌کند تا آموزش خاموش و بی‌اثر رخ ندهد. citeturn316115view0
 
 ## CI
 
@@ -148,4 +185,4 @@ CI علاوه بر مسیر عادی CPU، `cargo check --all-targets --features
 
 ## وضعیت مهندسی
 
-مسیر CPU، CUDA و AMD/Vulkan در یک مخزن نگهداری می‌شوند. گام‌های بعدی کیفیت مدل عبارت‌اند از tokenizer BPE/subword، dataset بزرگ و تمیز، document packing، mixed precision، fused/SDPA attention، memory planning، gradient checkpointing، optimizer-state checkpoint/resume کامل، validation perplexity و سپس GPU KV-cache inference.
+در حال حاضر مسیر AMD از نظر آموزش از پایه شامل دادهٔ واقعی corpus، tokenizer هدف، split ارزیابی، curriculum context، AdamW، scheduler، checkpoint و معیار perplexity است. برای گام‌های بعدی کیفیت و سرعت، اولویت‌های منطقی عبارت‌اند از fused/SDPA attention، mixed precision، gradient checkpointing، optimizer-state checkpoint/resume کامل و سپس GPU KV-cache inference.
