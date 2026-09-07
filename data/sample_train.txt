@@ -1,0 +1,176 @@
+GemmaAgent is a small decoder-only language model written in Rust.
+This file is a sample training corpus. It is designed for testing the training pipeline, not for producing a capable general-purpose model.
+
+A language model learns statistical patterns from sequences of tokens.
+During causal language modeling, the model receives tokens from the past and predicts the next token.
+For the sentence "Rust is fast", a training example can use "Rust is" as input and "is fast" as the shifted target.
+The training objective is commonly cross entropy loss.
+
+Tokenization converts text into token IDs.
+An embedding table converts token IDs into dense vectors.
+A transformer processes those vectors through repeated decoder blocks.
+A decoder block can contain RMSNorm, causal self-attention, a feed-forward network, and residual connections.
+
+Causal attention prevents a position from using information from future positions.
+Suppose the sequence contains five tokens.
+At position zero the model can see only position zero.
+At position two the model can use positions zero, one, and two.
+At position four the model can use all positions from zero through four.
+This property makes next-token prediction consistent with autoregressive generation.
+
+Multi-head attention uses queries, keys, and values.
+Attention scores measure how strongly each query should use each key.
+Softmax converts scores into normalized weights.
+The weighted values form the attention output.
+Different heads can learn different relationships in the sequence.
+
+RoPE, or rotary positional embedding, injects position information into query and key representations.
+RMSNorm normalizes hidden states using their root mean square.
+SwiGLU is a gated feed-forward architecture that combines a learned gate with a nonlinear transformation.
+Residual connections help information flow across deep transformer networks.
+
+The training loop has several important stages.
+First, read a corpus.
+Second, tokenize the corpus.
+Third, select training windows.
+Fourth, run the forward pass.
+Fifth, compute cross entropy.
+Sixth, calculate gradients with backpropagation.
+Seventh, clip gradients when required.
+Eighth, update parameters with AdamW.
+Finally, record the loss and periodically evaluate the validation set.
+
+A validation set must not be used for parameter updates.
+Training loss measures how well the model fits the training examples.
+Validation loss measures performance on held-out examples.
+If training loss decreases while validation loss increases, overfitting may be occurring.
+Perplexity is the exponential of the average negative log likelihood.
+
+AdamW is an optimizer frequently used for transformer models.
+Learning rate controls the size of parameter updates.
+Warmup gradually increases the learning rate at the beginning of training.
+Cosine decay can reduce the learning rate later in training.
+Gradient clipping limits unusually large gradients and can improve numerical stability.
+Gradient accumulation allows multiple small micro-batches to contribute to one optimizer update.
+
+Checkpoints are important for long training runs.
+A checkpoint can contain model weights, optimizer state, update number, and random state.
+Saving the best validation checkpoint is useful because the last training update is not necessarily the best model.
+
+Rust provides ownership, borrowing, lifetimes, traits, enums, pattern matching, and strong compile-time checks.
+Cargo is the standard Rust package manager and build system.
+A basic Rust program looks like this:
+
+fn main() {
+    println!("Hello from GemmaAgent");
+}
+
+A Rust function example:
+
+fn square(x: i32) -> i32 {
+    x * x
+}
+
+fn main() {
+    let value = square(7);
+    println!("{}", value);
+}
+
+Rust's Result type represents success or failure.
+Rust's Option type represents the presence or absence of a value.
+The question mark operator can propagate errors from functions that return Result.
+
+Example error handling:
+
+use std::fs;
+
+fn load_text(path: &str) -> Result<String, std::io::Error> {
+    let text = fs::read_to_string(path)?;
+    Ok(text)
+}
+
+Machine learning data should be clean and diverse.
+Repeated copies of one paragraph teach the model mostly that paragraph.
+A useful corpus should contain many topics, sentence lengths, writing styles, examples, questions, explanations, and code samples.
+Training data should not contain passwords, API keys, private keys, or other confidential information.
+
+Question: What is tokenization?
+Answer: Tokenization converts text into discrete token IDs that can be processed by a neural network.
+
+Question: What is an embedding?
+Answer: An embedding maps a token ID to a learned dense vector.
+
+Question: What is causal attention?
+Answer: Causal attention prevents a token position from attending to future positions.
+
+Question: Why is validation useful?
+Answer: Validation helps measure generalization and detect overfitting.
+
+Question: Why save checkpoints?
+Answer: Checkpoints allow training to resume after interruption and preserve useful model states.
+
+Question: What does AdamW do?
+Answer: AdamW updates model parameters using gradients together with adaptive moments and decoupled weight decay.
+
+Question: What is perplexity?
+Answer: Perplexity is the exponential of the average negative log likelihood.
+
+Question: What is a logit?
+Answer: A logit is an unnormalized score assigned to a possible next token.
+
+Question: What does softmax do?
+Answer: Softmax converts a vector of scores into probabilities that sum to one.
+
+Question: Why is gradient accumulation useful?
+Answer: It increases the effective batch size without requiring the complete batch to fit in GPU memory at once.
+
+GPU acceleration can improve training speed when tensor operations are large enough and the backend is efficient.
+AMD GPUs on Linux can use supported Vulkan compute paths.
+Actual performance depends on the GPU, driver, backend, model size, tensor shapes, and memory bandwidth.
+A benchmark on the target machine is more reliable than a theoretical speed estimate.
+
+A small model should be tested before a larger model.
+Short context and a tiny corpus make debugging faster.
+After the forward pass and gradients are verified, context length, hidden size, layer count, and dataset size can be increased.
+Correctness should be established before aggressive optimization.
+
+If loss becomes NaN, inspect the learning rate, input values, gradient norms, normalization, attention scores, and floating-point ranges.
+If loss remains high, check tokenization, targets, shifting, masking, model capacity, learning rate, and dataset quality.
+A model cannot learn useful general knowledge from a tiny repetitive corpus, even when the training implementation is correct.
+
+Example text continuation:
+Rust is a systems programming language.
+Rust focuses on safety and performance.
+Cargo builds Rust packages.
+Transformers process token sequences.
+Attention connects information across positions.
+A language model predicts the next token.
+
+Example arithmetic facts:
+Two plus two equals four.
+Three times four equals twelve.
+Ten minus three equals seven.
+Eight divided by two equals four.
+
+Example reasoning:
+If a box contains five red balls and three blue balls, the total number of balls is eight.
+If two balls are removed, six balls remain.
+
+Example science facts:
+Water freezes at 0 degrees Celsius at standard atmospheric pressure.
+Earth orbits the Sun.
+The Moon orbits Earth.
+Plants use light energy during photosynthesis.
+
+Example geography facts:
+A map represents locations and relationships between places.
+A continent contains many countries and regions.
+Latitude measures angular distance north or south of the equator.
+Longitude measures angular distance east or west of a reference meridian.
+
+Good training examples should express concepts in multiple forms.
+The same idea can appear as a definition, a question and answer, a paragraph, an example, or a short explanation.
+This variety helps the model learn language patterns rather than memorizing one exact template.
+
+The purpose of this file is to verify that GemmaAgent can read a UTF-8 corpus, tokenize it, create causal next-token targets, compute loss, backpropagate gradients, update parameters, evaluate validation data, and save checkpoints.
+For serious training, replace this sample with a much larger high-quality corpus appropriate for the desired language and domain.
