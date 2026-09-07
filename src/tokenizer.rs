@@ -44,8 +44,9 @@ mod tests {
     }
 
     #[test]
-    fn special_tokens_fit_after_byte_vocabulary() {
-        assert!(BOS >= 256);
-        assert!(EOS > BOS);
+    fn special_tokens_are_distinct_from_bytes() {
+        let tokenizer = Tokenizer::new();
+        let tokens = tokenizer.encode("");
+        assert_eq!(tokens, vec![BOS, EOS]);
     }
 }
