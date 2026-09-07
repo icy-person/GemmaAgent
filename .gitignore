@@ -4,3 +4,10 @@
 *.bin
 *.tok
 *.best
+/data/raw/
+/data/online/
+/data/bootstrap.txt
+/data/train.txt
+/data/val.txt
+/data/corpus_manifest.json
+/data/online_manifest.json
