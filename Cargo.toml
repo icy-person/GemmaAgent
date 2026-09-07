@@ -8,18 +8,16 @@ license="MIT"
 
 [features]
 default=["runner-cpu"]
-# Portable scalar Rust backend used by GitHub Actions/CPU runners.
+# GitHub-hosted runner / portable scalar CPU backend.
 runner-cpu=[]
-# Optional NVIDIA/CUDA path for supported desktop systems.
-cuda=["dep:candle-core","dep:candle-nn","candle-core/cuda","candle-nn/cuda"]
-# Desktop Linux AMD/Intel Vulkan path through Burn + WGPU.
+# Desktop Linux AMD/Intel Vulkan backend through Burn + WGPU.
 amd-vulkan=["dep:burn","dep:burn-wgpu","burn/std","burn/autodiff","burn/wgpu","burn/fusion"]
-# Android GPU path through the same Burn/WGPU Vulkan engine, built for arm64-v8a.
+# Android arm64 Vulkan backend through the same Burn + WGPU engine.
 android-vulkan=["dep:burn","dep:burn-wgpu","burn/std","burn/autodiff","burn/wgpu","burn/fusion"]
+# The default is intentionally CPU for local/runner compatibility. Use
+# --no-default-features when selecting the GPU backend explicitly.
 
 [dependencies]
-candle-core={version="0.11.0",default-features=false,optional=true}
-candle-nn={version="0.11.0",default-features=false,optional=true}
 burn={version="0.21.0",default-features=false,optional=true}
 burn-wgpu={version="0.21.0",default-features=false,optional=true}
 
