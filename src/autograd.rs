@@ -13,7 +13,6 @@ enum Op {
     Log(Value),
     Neg(Value),
     Softmax(Value),
-    Relu(Value),
     Silu(Value),
     ConcatRows(Vec<Value>),
     ConcatCols(Vec<Value>),
@@ -171,20 +170,14 @@ impl Value {
         )
     }
 
-    pub fn relu(&self) -> Self {
-        Self::mk(
-            self.shape().0,
-            self.shape().1,
-            self.data().into_iter().map(|x| x.max(0.0)).collect(),
-            Op::Relu(self.clone()),
-        )
-    }
-
     pub fn silu(&self) -> Self {
         Self::mk(
             self.shape().0,
             self.shape().1,
-            self.data().into_iter().map(|x| x / (1.0 + (-x).exp())).collect(),
+            self.data()
+                .into_iter()
+                .map(|x| x / (1.0 + (-x).exp()))
+                .collect(),
             Op::Silu(self.clone()),
         )
     }
@@ -254,7 +247,12 @@ impl Value {
         let (rows, cols) = self.shape();
         assert_eq!(rows, 1, "gather expects a row vector");
         assert!(index < cols);
-        Self::mk(1, 1, vec![self.data()[index]], Op::Gather(self.clone(), index))
+        Self::mk(
+            1,
+            1,
+            vec![self.data()[index]],
+            Op::Gather(self.clone(), index),
+        )
     }
 
     pub fn row(&self, row: usize) -> Self {
@@ -294,7 +292,6 @@ fn topo(value: &Value, seen: &mut HashSet<usize>, order: &mut Vec<Value>) {
         | Op::Log(a)
         | Op::Neg(a)
         | Op::Softmax(a)
-        | Op::Relu(a)
         | Op::Silu(a)
         | Op::Slice(a, _, _)
         | Op::Gather(a, _)
@@ -327,8 +324,14 @@ fn back(value: &Value) {
         Op::Mul(a, b) => {
             let x = a.data();
             let y = b.data();
-            accumulate(&a, &grad.iter().zip(&y).map(|(g, y)| g * y).collect::<Vec<_>>());
-            accumulate(&b, &grad.iter().zip(&x).map(|(g, x)| g * x).collect::<Vec<_>>());
+            accumulate(
+                &a,
+                &grad.iter().zip(&y).map(|(g, y)| g * y).collect::<Vec<_>>(),
+            );
+            accumulate(
+                &b,
+                &grad.iter().zip(&x).map(|(g, x)| g * x).collect::<Vec<_>>(),
+            );
         }
         Op::MatMul(a, b) => {
             let (ar, ac) = a.shape();
@@ -366,23 +369,12 @@ fn back(value: &Value) {
                 &grad
                     .iter()
                     .zip(data)
-                    .map(|(g, x)| g / x.max(1e-20))
+                    .map(|(g, x)| if x >= 1e-20 { g / x } else { 0.0 })
                     .collect::<Vec<_>>(),
             );
         }
         Op::Neg(a) => {
             accumulate(&a, &grad.iter().map(|g| -g).collect::<Vec<_>>());
-        }
-        Op::Relu(a) => {
-            let data = a.data();
-            accumulate(
-                &a,
-                &grad
-                    .iter()
-                    .zip(data)
-                    .map(|(g, x)| if x > 0.0 { *g } else { 0.0 })
-                    .collect::<Vec<_>>(),
-            );
         }
         Op::Silu(a) => {
             let data = a.data();
@@ -513,5 +505,13 @@ mod tests {
         let s = 1.0 / (1.0 + (-0.7_f32).exp());
         let expected = s * (1.0 + 0.7 * (1.0 - s));
         assert!((x.grad()[0] - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn log_clamp_has_zero_gradient_below_floor() {
+        let x = Value::leaf(1, 1, vec![1e-25]);
+        let y = x.log();
+        y.backward();
+        assert_eq!(x.grad(), vec![0.0]);
     }
 }
