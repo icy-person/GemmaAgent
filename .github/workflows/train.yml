@@ -60,13 +60,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system dependencies on Ubuntu runners
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euxo pipefail
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
+          if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends python3 ca-certificates pkg-config libvulkan1 mesa-vulkan-drivers vulkan-tools
+          else
+            echo "apt-get not available; assuming the self-hosted runner already has Python/Vulkan prerequisites."
           fi
 
       - name: Install Rust
