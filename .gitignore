@@ -2,3 +2,5 @@
 *.ckpt
 *.safetensors
 *.bin
+*.tok
+*.best
