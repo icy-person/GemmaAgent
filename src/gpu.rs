@@ -1,12 +1,11 @@
 #![cfg(feature = "cuda")]
 
-use candle_core::{DType, D, Device, IndexOp, Result, Tensor};
+use candle_core::{DType, D, Device, Result, Tensor};
 use candle_nn::embedding::Embedding;
-use candle_nn::init::{FanInOut, Init, NormalOrUniform, NonLinearity};
 use candle_nn::layer_norm::RmsNorm;
 use candle_nn::linear::{linear_no_bias, Linear};
 use candle_nn::loss::cross_entropy;
-use candle_nn::ops::{rms_norm, silu, softmax};
+use candle_nn::ops::{silu, softmax};
 use candle_nn::optim::{AdamW, Optimizer, ParamsAdamW};
 use candle_nn::rotary_emb::rope_slow;
 use candle_nn::{embedding, rms_norm as make_rms_norm, Module, VarBuilder, VarMap};
@@ -18,7 +17,6 @@ use crate::tokenizer::Tokenizer;
 
 const EPS: f64 = 1e-5;
 const ROPE_THETA: f64 = 10_000.0;
-const DEFAULT_GPU_LR: f64 = 3e-4;
 
 struct GpuBlock {
     ln1: RmsNorm,
@@ -145,19 +143,10 @@ impl GpuModel {
     }
 }
 
-fn make_init() -> Init {
-    Init::Kaiming {
-        dist: NormalOrUniform::Normal,
-        fan: FanInOut::FanIn,
-        non_linearity: NonLinearity::Linear,
-    }
-}
-
 fn build_varmap(cfg: Config, device: &Device) -> Result<(VarMap, GpuModel)> {
     device.set_seed(42)?;
     let varmap = VarMap::new();
-    let mut vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
-    vb = vb.pp("model");
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, device).pp("model");
     let model = GpuModel::new(cfg, vb, device)?;
     Ok((varmap, model))
 }
@@ -216,8 +205,9 @@ pub fn train(
     assert!(encoded.len() > cfg.context + 1);
 
     println!(
-        "GemmaAgent GPU: {} params | context {} | heads {} | batch {} | lr {:.6}",
-        cfg.params(), cfg.context, cfg.heads, batch_size, lr
+        "GemmaAgent GPU: {} params + RMSNorm | context {} | heads {} | batch {} | lr {:.6}",
+        cfg.params() + cfg.d_model * (2 * cfg.layers + 1),
+        cfg.context, cfg.heads, batch_size, lr
     );
     println!("training corpus: {} bytes from {data_path}", corpus.len());
     println!("checkpoint format: Candle safetensors -> {checkpoint}");
@@ -249,8 +239,9 @@ pub fn train(
 
         if step % 10 == 9 || step + 1 == steps {
             let elapsed = last.elapsed().as_secs_f64().max(f64::MIN_POSITIVE);
-            let avg = loss_total / 10.0_f64.min((step + 1) as f64);
-            let tokens = (batch_size * cfg.context * 10.min(step + 1)) as f64;
+            let samples = 10.min(step + 1);
+            let avg = loss_total / samples as f64;
+            let tokens = (batch_size * cfg.context * samples) as f64;
             println!(
                 "gpu step {:5} loss {:.5} | {:.0} tok/s",
                 step + 1,
