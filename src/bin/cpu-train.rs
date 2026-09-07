@@ -47,6 +47,7 @@ fn cross_entropy(model: &Model, input: &[usize], target: usize, targets_per_step
         selected += 1;
     }
     total = total.add(&cross_entropy_from_hidden(model, hidden.last().expect("non-empty hidden sequence"), target));
+    selected += 1;
     total.div_scalar(selected as f32)
 }
 
