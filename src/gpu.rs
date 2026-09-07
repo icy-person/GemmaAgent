@@ -226,7 +226,7 @@ pub fn train(
     let mut loss_total = 0.0f64;
     let mut last = Instant::now();
     for update in 0..steps {
-        let mut grad_store = candle_core::backprop::GradStore::new();
+        let mut grad_store = candle_core::backprop::GradStore::default();
         let mut update_loss = 0.0f64;
         for micro in 0..grad_accum {
             let logical_step = update * grad_accum + micro;
@@ -323,7 +323,7 @@ mod tests {
         assert!(loss.to_scalar::<f32>()?.is_finite());
         let grads = loss.backward()?;
         assert!(!varmap.all_vars().is_empty());
-        assert!(!grads.is_empty());
+        assert!(!grads.get_ids().collect::<Vec<_>>().is_empty());
         Ok(())
     }
 
