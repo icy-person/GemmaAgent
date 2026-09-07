@@ -4,40 +4,33 @@
 
 ## هستهٔ فعلی
 
-- reverse-mode Autograd با `matmul`, `transpose`, `softmax`, `log`, `gather`, row-gather و slicing
-- RMSNorm پارامتر-free با backward اختصاصی در مسیر CPU
+- reverse-mode Autograd در مسیر CPU
 - causal multi-head self-attention
-- decoder block با pre-norm، residual و feed-forward
-- SiLU در FFN
-- embedding مشترک ورودی/خروجی
-- positional encoding سینوسی در مسیر CPU
+- decoder block و FFN با SiLU
 - tokenizer بایتی با BOS/EOS
 - next-token cross-entropy
-- آموزش چندهدفهٔ causal از چند موقعیت داخل هر context window
-- AdamW با weight decay، bias correction و global gradient clipping در مسیر CPU
-- checkpoint باینری shape-safe و corruption-aware برای مسیر CPU
-- runtime مستقیم CPU و KV cache
-- greedy decoding و sampling با `temperature` و `top-k`
-- benchmark داخلی برای prefill/decode
+- آموزش چندهدفهٔ causal در مسیر CPU
+- AdamW و global gradient clipping در مسیر CPU
+- checkpoint امن برای مسیر CPU
+- runtime مستقیم CPU و KV cache برای inference
+- sampling با `temperature` و `top-k`
 - **backend آموزشی CUDA اختیاری با Candle**
-- GPU autograd، RMSNorm، RoPE، dense causal attention، AdamW و batch training
+- GPU autograd، pre-norm RMSNorm، RoPE، causal attention، AdamW و batch training
+- GPU gradient accumulation
+- warmup + cosine learning-rate schedule
 - GPU checkpoint با Safetensors
 
 ## پروفایل‌ها
 
-مدل کوچک CPU:
+مدل کوچک:
 
 `vocab=258 | context=128 | d_model=64 | layers=2 | heads=4 | ffn=128`
 
-مدل هدف CPU:
+مدل هدف:
 
 `vocab=16384 | context=1024 | d_model=416 | layers=6 | heads=8 | ffn=1664`
 
-فرمول شمارش پارامترهای وزن‌های اصلی:
-
-`vocab*d_model + layers*(4*d_model^2 + 2*d_model*ffn)`
-
-که برای پروفایل هدف `19,275,776` پارامتر است. مسیر GPU به‌دلیل RMSNormهای قابل‌آموزش gainهای اضافی دارد.
+پروفایل هدف CPU در وزن‌های اصلی دقیقاً `19,275,776` پارامتر دارد. مسیر GPU به‌دلیل gainهای RMSNorm تعداد پارامتر بیشتری دارد.
 
 ## آموزش CPU
 
@@ -52,15 +45,15 @@ cargo run --release -- train 5000 gemma-agent.ckpt \
 
 ## آموزش GPU / CUDA
 
-Backend GPU با Candle 0.11 پیاده شده است. Candle برای Rust backendهای CPU/CUDA و backpropagation دارد و candle-nn نیز AdamW، RMSNorm، RoPE و عملیات attention را ارائه می‌کند. citeturn687109search2turn170084search0turn170084search1turn912734search0
+Backend GPU با Candle 0.11 پیاده شده است. Candle برای CPU/CUDA، backpropagation، RMSNorm، RoPE و AdamW API رسمی دارد. citeturn687109search2turn170084search0turn170084search1turn313133search4
 
-ابتدا بررسی کن کارت NVIDIA و driver دیده می‌شوند:
+ابتدا بررسی کن GPU دیده می‌شود:
 
 ```bash
 nvidia-smi
 ```
 
-سپس training را روی GPU صفر اجرا کن:
+### تست سریع روی مدل کوچک
 
 ```bash
 cargo run --release --features cuda --bin gpu-train -- \
@@ -68,70 +61,74 @@ cargo run --release --features cuda --bin gpu-train -- \
   --data ./train.txt \
   --checkpoint gemma-agent-gpu.safetensors \
   --batch-size 8 \
+  --grad-accum 2 \
   --lr 0.0003 \
   --checkpoint-every 250 \
   --gpu 0
 ```
 
-در این مسیر loss روی تمام موقعیت‌های `context` محاسبه می‌شود؛ بنابراین آموزش، next-token objective متراکم واقعی دارد. `batch-size` تعداد windowهای هم‌زمان روی GPU را تعیین می‌کند.
+این مسیر تمام موقعیت‌های context را در loss وارد می‌کند و optimizer updateها را روی GPU انجام می‌دهد. `grad-accum` چند microbatch را قبل از هر update جمع می‌کند. learning rate از warmup عبور کرده و سپس cosine decay می‌شود.
 
-برای GPU با حافظه محدود:
-
-```bash
---batch-size 2
-```
-
-یا:
+### مدل هدف ۱۹ میلیون پارامتری
 
 ```bash
---batch-size 4
-```
-
-برای throughput بیشتر، `8` یا بالاتر را تا سقف حافظهٔ کارت افزایش بده.
-
-### GPU benchmark
-
-```bash
-cargo run --release --features cuda --bin gpu-bench -- \
-  --batch-size 8 \
-  --context 128 \
-  --iterations 100 \
+cargo run --release --features cuda --bin gpu-train -- \
+  --target \
+  --steps 5000 \
+  --data ./train.txt \
+  --checkpoint gemma-agent-target-gpu.safetensors \
+  --batch-size 1 \
+  --grad-accum 4 \
+  --lr 0.0003 \
+  --checkpoint-every 100 \
   --gpu 0
 ```
 
-## چرا CUDA اختیاری است؟
+برای مدل هدف، به‌علت `context=1024` و attention متراکم، از `--batch-size 1` شروع کن و فقط در صورت کافی بودن VRAM مقدار آن را بالا ببر. GPU trainer در حال حاضر F32 است تا پایداری عددی training حفظ شود.
 
-نسخهٔ عادی پروژه بدون CUDA همچنان با Rust stable ساخته می‌شود. برای GPU باید feature `cuda` فعال شود. candle-core و candle-nn هر دو feature رسمی CUDA دارند. citeturn463911search0turn463911search4
+### GPU benchmark
+
+مدل debug:
+
+```bash
+cargo run --release --features cuda --bin gpu-bench -- \
+  --batch-size 8 --context 128 --iterations 100 --gpu 0
+```
+
+مدل هدف:
+
+```bash
+cargo run --release --features cuda --bin gpu-bench -- \
+  --target --batch-size 1 --context 1024 --iterations 20 --gpu 0
+```
 
 ## معماری GPU
 
-مسیر GPU برای training از نظر پایداری و کیفیت یک مرحله جلوتر از kernel سادهٔ CPU است:
+مسیر GPU شامل:
 
 - embedding و output projection مشترک
-- pre-norm با RMSNorm قابل‌آموزش
-- RoPE برای موقعیت
-- causal multi-head self-attention
+- pre-norm RMSNorm قابل‌آموزش
+- RoPE با مسیر differentiable برای backward
+- Q/K/V و output projection بدون bias
+- causal multi-head attention
 - SiLU FFN
 - dense next-token loss روی تمام موقعیت‌ها
-- batch training واقعی روی GPU
+- batch واقعی روی CUDA
+- gradient accumulation با `GradStore`
 - AdamW با `beta1=0.9`, `beta2=0.95`, `weight_decay=0.1`
-- checkpoint در قالب Safetensors
+- warmup + cosine LR
+- checkpoint در Safetensors
 
-برای training از نسخه‌های slow/graph-based عملیات RoPE در جاهایی که به gradient نیاز است استفاده شده تا مسیر backward حفظ شود؛ APIهای Candle این عملیات را روی همان device اجرا می‌کنند. citeturn912734search1turn734540search0
+Candle برای `GradStore.extend` و optimizer `step` API رسمی دارد؛ بنابراین accumulation در سطح gradient قبل از optimizer update انجام می‌شود. citeturn544034search1turn544034search0
 
-## Inference CPU
+## چرا CUDA اختیاری است؟
 
-```bash
-cargo run --release -- infer gemma-agent.ckpt "Rust is" \
-  --temperature 0.8 \
-  --top-k 40 \
-  --tokens 128
-```
+پروژه بدون feature `cuda` همچنان مسیر CPU و CI را حفظ می‌کند. feature مربوط به CUDA در `candle-core` و `candle-nn` فعال می‌شود. citeturn544034search6
 
 ## Checkpoint
 
-`gemma-agent.ckpt` مربوط به مسیر CPU است و `gemma-agent-gpu.safetensors` مربوط به مدل GPU. این دو checkpoint format مشترک ندارند.
+`*.ckpt` برای مسیر CPU و `*.safetensors` برای مسیر GPU در git نادیده گرفته می‌شوند. checkpoint GPU را نمی‌توان با runtime CPU فعلی مستقیماً بارگذاری کرد.
 
 ## وضعیت مهندسی
 
-مسیر CPU برای correctness و آموزش از پایه حفظ شده است. مسیر CUDA اکنون training واقعی tensor-level روی GPU، autograd، RMSNorm، RoPE و batch loss متراکم دارد. مرحلهٔ بعدی برای کیفیت مدل شامل tokenizer BPE/subword، dataset بزرگ و تمیز، mixed precision، flash/fused attention، memory planning و سپس runtime GPU با KV cache است.
+مسیر GPU اکنون training واقعی روی CUDA را دارد و از نظر pipeline، objective، normalization، RoPE، optimizer و checkpoint یک پله جدی‌تر از kernel scalar قبلی است. برای کیفیت مدل واقعی، مهم‌ترین ارتقاء بعدی tokenizer BPE/subword، dataset بزرگ و تمیز، packing، mixed precision پس از تثبیت F32، fused/SDPA attention، memory planning و سپس GPU KV-cache inference است.
