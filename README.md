@@ -4,7 +4,7 @@
 
 ## سه backend اصلی
 
-پروژه اکنون سه مسیر اجرایی مشخص دارد:
+پروژه دقیقاً سه مسیر اجرایی دارد:
 
 | Backend | هدف | فناوری | خروجی اصلی |
 |---|---|---|---|
@@ -12,20 +12,19 @@
 | `amd-vulkan` | لپ‌تاپ/دسکتاپ Radeon یا GPU سازگار | Burn + WGPU + Vulkan | آموزش + inference + KV-cache |
 | `android-vulkan` | Android arm64 با GPU Vulkan | Burn + WGPU + Vulkan | inference روی دستگاه |
 
-WGPU به‌صورت رسمی Vulkan را روی Linux و Android پشتیبانی می‌کند، بنابراین مسیر Android از همان هستهٔ Vulkan استفاده می‌کند و مدل/توکنایزر را با backend لپ‌تاپ به اشتراک می‌گذارد. citeturn650859search0turn650859search2
+فقط یکی از این سه feature را برای هر build فعال کن. برای دو backend GPU از `--no-default-features` استفاده می‌شود تا CPU backend ناخواسته نیز وارد build نشود. مسیر Android و AMD هستهٔ Transformer، tokenizer و فرمت checkpoint مشترک دارند.
 
 ## هستهٔ فعلی
 
 - reverse-mode Autograd در مسیر CPU
 - causal multi-head self-attention و FFN با SiLU در مسیر CPU
-- tokenizer بایتی CPU با BOS/EOS
-- tokenizer هدف AMD/Android با subwordهای آموخته‌شده از corpus و byte fallback
+- tokenizer بایتی برای profile کوچک و tokenizer subword آموخته‌شده برای profileهای بزرگ
+- byte fallback و ذخیره/بازیابی tokenizer
 - next-token cross-entropy روی تمام موقعیت‌های causal در backend GPU
 - AdamW، gradient clipping و warmup/cosine schedule
 - train/validation split و validation perplexity
 - latest و best checkpoint
 - checkpoint مدل + optimizer state + RNG/training metadata برای resume
-- backend CUDA اختیاری با Candle
 - backend **Vulkan** مشترک برای AMD desktop و Android
 - decoder-only GPU با pre-norm RMSNorm
 - RoPE روی Q/K
@@ -48,11 +47,9 @@ WGPU به‌صورت رسمی Vulkan را روی Linux و Android پشتیبان
 
 ## GitHub Runner / CPU
 
-backend پیش‌فرض `runner-cpu` است و برای GitHub Actions طراحی شده است:
-
 ```bash
-cargo build --release --features runner-cpu --bin cpu-train
-cargo run --release --features runner-cpu --bin cpu-train -- \
+cargo build --release --no-default-features --features runner-cpu --bin cpu-train
+cargo run --release --no-default-features --features runner-cpu --bin cpu-train -- \
   --large \
   --steps 5000 \
   --data ./train.txt \
@@ -66,11 +63,11 @@ cargo run --release --features runner-cpu --bin cpu-train -- \
   --checkpoint-every 25
 ```
 
-resume کامل از وزن، optimizer state، RNG و tokenizer انجام می‌شود.
+checkpoint کامل شامل وزن، optimizer state، RNG و tokenizer است.
 
-## لپ‌تاپ / AMD Vulkan
+## Laptop / AMD Vulkan
 
-برای Radeon روی لینوکس، مسیر `amd-vulkan` با **Burn + WGPU + Vulkan** ساخته شده است.
+برای Radeon روی لینوکس، مسیر `amd-vulkan` با **Burn + WGPU + Vulkan** اجرا می‌شود.
 
 بررسی GPU:
 
@@ -79,11 +76,11 @@ vulkaninfo --summary
 lspci | grep -Ei 'vga|3d|display'
 ```
 
-آموزش:
+build و آموزش:
 
 ```bash
-cargo build --release --features amd-vulkan --bin amd-train
-cargo run --release --features amd-vulkan --bin amd-train -- \
+cargo build --release --no-default-features --features amd-vulkan --bin amd-train
+cargo run --release --no-default-features --features amd-vulkan --bin amd-train -- \
   --target \
   --steps 20000 \
   --data ./train.txt \
@@ -99,20 +96,30 @@ cargo run --release --features amd-vulkan --bin amd-train -- \
   --gpu 0
 ```
 
-برای انتخاب خودکار GPU از `--gpu-kind best` استفاده می‌شود. `--gpu-util 50` نیز duty-cycle تقریبی workload را محدود می‌کند.
+برای انتخاب خودکار GPU از `--gpu-kind best` استفاده می‌شود. `--gpu-util 50` duty-cycle تقریبی workload را محدود می‌کند.
+
+benchmark:
+
+```bash
+cargo run --release --no-default-features --features amd-vulkan --bin amd-bench -- \
+  --batch-size 1 \
+  --context 256 \
+  --iterations 50 \
+  --gpu-kind integrated \
+  --gpu 0
+```
 
 ## Android / Vulkan
 
-Android از backend مستقل `android-vulkan` استفاده می‌کند ولی هستهٔ Transformer، tokenizer و checkpoint آن با مسیر AMD مشترک است. مسیر رسمی WGPU برای Linux/Android شامل Vulkan است. citeturn650859search0turn650859search3
-
-برای arm64-v8a:
+Android با feature `android-vulkan` و target `aarch64-linux-android` همان موتور Vulkan مسیر AMD را استفاده می‌کند و برای inference ساخته شده است.
 
 ```bash
 rustup target add aarch64-linux-android
-cargo ndk -t arm64-v8a build --release --features android-vulkan --bin android-infer
+cargo install cargo-ndk
+cargo ndk -t arm64-v8a build --release --no-default-features --features android-vulkan --bin android-infer
 ```
 
-سپس binary را روی دستگاه اجرا کن یا به اپ Android خودت بسته‌بندی کن. نمونهٔ inference:
+نمونهٔ اجرا روی دستگاه:
 
 ```bash
 ./android-infer \
@@ -125,70 +132,56 @@ cargo ndk -t arm64-v8a build --release --features android-vulkan --bin android-i
   --top-k 40
 ```
 
-برای build و بررسی خودکار Android در CI:
+در CI نیز target اندروید به‌صورت مستقل compile-check می‌شود.
 
-```bash
-cargo check --target aarch64-linux-android --features android-vulkan --bin android-infer
-```
-
-## CUDA
-
-```bash
-nvidia-smi
-cargo run --release --features cuda --bin gpu-train -- \
-  --steps 5000 \
-  --data ./train.txt \
-  --checkpoint gemma-agent-gpu.safetensors \
-  --batch-size 8 \
-  --grad-accum 2 \
-  --lr 0.0003 \
-  --checkpoint-every 250 \
-  --gpu 0
-```
-
-## معماری Vulkan
+## معماری مشترک Vulkan
 
 ساختار هر decoder block:
 
 `RMSNorm -> fused QKV -> RoPE(Q,K) -> native causal SDPA -> output projection -> residual -> RMSNorm -> SwiGLU -> down projection -> residual`
 
-attention از primitive بومی Burn استفاده می‌کند و `is_causal=true` را مستقیماً به backend می‌دهد. gradient accumulation نیز با `GradientsAccumulator` انجام می‌شود.
+در inference، prompt یک‌بار prefill می‌شود و K/V هر لایه در KV-cache نگه‌داری می‌شود؛ tokenهای بعدی incremental پردازش می‌شوند.
 
-KV-cache در inference ابتدا prompt را prefill می‌کند و سپس هر token جدید را incremental پردازش می‌کند.
+## انتخاب backend
+
+Runner:
+
+```bash
+cargo test --all-targets --no-default-features --features runner-cpu
+```
+
+Laptop:
+
+```bash
+cargo check --all-targets --no-default-features --features amd-vulkan
+```
+
+Android:
+
+```bash
+cargo check --target aarch64-linux-android --no-default-features --features android-vulkan --bin android-infer
+```
+
+هر build باید با یک backend مشخص ساخته شود؛ این کار dependency و compile surface را جدا نگه می‌دارد.
 
 ## سرعت و حافظه
 
-قبل از آموزش مدل هدف روی لپ‌تاپ:
-
-```bash
-cargo run --release --features amd-vulkan --bin amd-bench -- \
-  --batch-size 1 \
-  --context 256 \
-  --iterations 50 \
-  --gpu-kind integrated \
-  --gpu 0
-```
-
-برای لپ‌تاپ 8GB RAM، `batch-size=1` نقطهٔ شروع امن است و `grad-accum` برای افزایش batch مؤثر استفاده می‌شود.
-
-GPU trainer فعلاً F32 است تا correctness و پایداری اولویت داشته باشند؛ mixed precision بعد از benchmark واقعی سخت‌افزار اضافه می‌شود.
+روی لپ‌تاپ 8GB RAM، `batch-size=1` نقطهٔ شروع امن است و `grad-accum` برای افزایش batch مؤثر استفاده می‌شود. backend Vulkan فعلاً F32 است تا correctness و پایداری اولویت داشته باشند.
 
 ## کیفیت مدل
 
-فناوری آموزش به‌تنهایی مدل را باهوش نمی‌کند. ترتیب اثرگذاری عملی این است: corpus بزرگ و تمیز، tokenizer مناسب، معماری پایدار، تعداد tokenهای آموزشی کافی، validation، scheduler و سپس بهینه‌سازی سرعت.
-
-`train.txt` باید حاوی متن واقعی و متنوع باشد؛ یک corpus کوچک تکراری فقط باعث حفظ‌کردن همان متن می‌شود و توان استدلال عمومی ایجاد نمی‌کند.
+فناوری backend به‌تنهایی مدل را باهوش نمی‌کند. کیفیت بیشتر به corpus تمیز و بزرگ، tokenizer مناسب، تعداد token کافی، validation صحیح و آموزش طولانی وابسته است. رسیدن به validation loss زیر 1 روی corpus کوچک ممکن است صرفاً نشانهٔ memorization باشد.
 
 ## CI
 
-CI سه مسیر را به‌صورت جدا بررسی می‌کند:
+CI سه مسیر را مستقل بررسی می‌کند:
 
 1. `Runner / CPU backend`
 2. `Laptop / AMD Vulkan backend`
 3. `Android / arm64 Vulkan backend`
 
-روی GitHub-hosted runner امکان benchmark واقعی Radeon یا GPU موبایل وجود ندارد؛ CI فقط compile/test correctness را بررسی می‌کند. benchmark نهایی باید روی سخت‌افزار واقعی انجام شود.
+GitHub-hosted runner سخت‌افزار Radeon یا GPU موبایل کاربر را شبیه‌سازی نمی‌کند؛ بنابراین benchmark نهایی باید روی دستگاه واقعی انجام شود.
 
 ## وضعیت فعلی
 
-هستهٔ Vulkan اکنون بین AMD desktop و Android مشترک است و هر دو از **RoPE + native SDPA + SwiGLU + gradient accumulation + validation + optimizer-state resume + KV-cache inference** استفاده می‌کنند.
+پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند و هر دو دارای **RoPE + native SDPA + SwiGLU + KV-cache** هستند.
