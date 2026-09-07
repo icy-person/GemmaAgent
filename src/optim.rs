@@ -60,10 +60,6 @@ impl AdamW {
             parameter.zero_grad();
         }
     }
-
-    pub fn timestep(&self) -> usize {
-        self.t
-    }
 }
 
 #[cfg(test)]
@@ -76,9 +72,8 @@ mod tests {
         let loss = p.mul(&Value::leaf(1, 1, vec![2.0]));
         loss.backward();
         let mut opt = AdamW::new(0.01);
-        opt.step(&[p.clone()]);
+        opt.step(std::slice::from_ref(&p));
         assert!(p.data()[0] < 1.0);
         assert_eq!(p.grad(), vec![0.0]);
-        assert_eq!(opt.timestep(), 1);
     }
 }
