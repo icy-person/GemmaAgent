@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Build a cached, attributed online corpus from Wikimedia topic searches.
 
-The script intentionally uses a small, rate-limited public API footprint so a
-training job can refresh knowledge without acting like a crawler. Every page is
-cached by page id/revision metadata and all downloaded text is represented in a
-manifest with source URL, license, revision id, and SHA-256.
+The collector deliberately uses a small, rate-limited public API footprint.
+Each downloaded extract is cached by page id and tracked with its revision id,
+source URL, license and SHA-256. A restored manifest is reused before making
+new API requests; pass --refresh to query the configured topics again.
 
 Outputs:
-  data/online/*.txt
+  data/online/pages/*.txt
   data/online_manifest.json
   data/online/train.txt
   data/online/val.txt
@@ -15,7 +15,7 @@ Outputs:
 Examples:
   python3 scripts/prepare_online_corpus.py
   python3 scripts/prepare_online_corpus.py --pages-per-topic 20 --max-pages 120
-  python3 scripts/prepare_online_corpus.py --language en --min-chars 300
+  python3 scripts/prepare_online_corpus.py --refresh --max-pages 160
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
@@ -55,16 +54,6 @@ TOPICS = [
     "engineering",
     "statistics",
 ]
-
-
-@dataclass
-class Page:
-    pageid: int
-    title: str
-    url: str
-    revision_id: int | None
-    characters: int
-    sha256: str
 
 
 def api(params: dict[str, str], timeout: int, retries: int, delay: float) -> dict:
@@ -130,6 +119,45 @@ def search_topic(topic: str, limit: int, timeout: int, retries: int, delay: floa
     return payload.get("query", {}).get("pages", [])
 
 
+def load_manifest(path: Path) -> dict[int, dict]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        pages = raw.get("pages", []) if isinstance(raw, dict) else raw
+        if not isinstance(pages, list):
+            return {}
+        return {int(row["pageid"]): row for row in pages if isinstance(row, dict) and "pageid" in row}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+
+
+def write_page(out: Path, page: dict, topic: str) -> dict | None:
+    pageid = int(page.get("pageid", 0))
+    title = str(page.get("title", "")).strip()
+    extract = normalize(str(page.get("extract", "")))
+    if not pageid or not title or not extract:
+        return None
+    revision_id = None
+    revisions = page.get("revisions") or []
+    if revisions:
+        revision_id = revisions[0].get("revid")
+    source_url = page.get("fullurl") or f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
+    path = out / "pages" / f"{pageid}_{safe_slug(title)}.txt"
+    path.write_text(extract + "\n\n", encoding="utf-8")
+    return {
+        "pageid": pageid,
+        "title": title,
+        "url": source_url,
+        "revision_id": revision_id,
+        "characters": len(extract),
+        "sha256": hashlib.sha256(extract.encode("utf-8")).hexdigest(),
+        "license": LICENSE,
+        "path": str(path),
+        "topic": topic,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default="data/online")
@@ -141,6 +169,7 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=0.35)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--retries", type=int, default=4)
+    parser.add_argument("--refresh", action="store_true", help="query Wikimedia even when a cached corpus exists")
     args = parser.parse_args()
 
     if args.pages_per_topic < 1 or args.max_pages < 1:
@@ -150,65 +179,38 @@ def main() -> int:
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    pages_dir = out / "pages"
-    pages_dir.mkdir(parents=True, exist_ok=True)
+    (out / "pages").mkdir(parents=True, exist_ok=True)
     manifest_path = out.parent / "online_manifest.json"
 
-    existing: dict[int, dict] = {}
-    if manifest_path.exists():
-        try:
-            existing = {int(row["pageid"]): row for row in json.loads(manifest_path.read_text(encoding="utf-8"))}
-        except (OSError, ValueError, KeyError, TypeError):
-            existing = {}
-
-    found: dict[int, dict] = dict(existing)
-    for topic in TOPICS:
-        if len(found) >= args.max_pages:
-            break
-        try:
-            pages = search_topic(topic, args.pages_per_topic, args.timeout, args.retries, args.delay)
-        except Exception as exc:
-            print(f"warning: topic {topic!r} failed: {exc}", file=sys.stderr)
-            continue
-        for page in pages:
-            pageid = int(page.get("pageid", 0))
-            if not pageid or pageid in found:
-                continue
-            extract = normalize(page.get("extract", ""))
-            if len(extract) < args.min_chars:
-                continue
-            revision_id = None
-            revisions = page.get("revisions") or []
-            if revisions:
-                revision_id = revisions[0].get("revid")
-            source_url = page.get("fullurl") or f"https://en.wikipedia.org/wiki/{urllib.parse.quote(page['title'].replace(' ', '_'))}"
-            record = {
-                "pageid": pageid,
-                "title": page["title"],
-                "url": source_url,
-                "revision_id": revision_id,
-                "extract": extract,
-            }
-            filename = f"{pageid}_{safe_slug(page['title'])}.txt"
-            path = pages_dir / filename
-            path.write_text(extract + "\n\n", encoding="utf-8")
-            found[pageid] = {
-                "pageid": pageid,
-                "title": page["title"],
-                "url": source_url,
-                "revision_id": revision_id,
-                "characters": len(extract),
-                "sha256": hashlib.sha256(extract.encode("utf-8")).hexdigest(),
-                "license": LICENSE,
-                "path": str(path),
-                "topic": topic,
-            }
-            if len(found) >= args.max_pages:
+    found = {} if args.refresh else load_manifest(manifest_path)
+    if len(found) < args.max_pages or args.refresh:
+        for topic in TOPICS:
+            if len(found) >= args.max_pages and not args.refresh:
                 break
+            try:
+                pages = search_topic(topic, args.pages_per_topic, args.timeout, args.retries, args.delay)
+            except Exception as exc:
+                print(f"warning: topic {topic!r} failed: {exc}", file=sys.stderr)
+                continue
+            for page in pages:
+                candidate = write_page(out, page, topic)
+                if candidate is None or candidate["characters"] < args.min_chars:
+                    continue
+                found[candidate["pageid"]] = candidate
+                if len(found) >= args.max_pages and not args.refresh:
+                    break
 
-    rows = sorted(found.values(), key=lambda x: (x["title"].lower(), x["pageid"]))
+    rows = sorted(found.values(), key=lambda x: (x["title"].lower(), x["pageid"]))[: args.max_pages]
     if not rows:
         raise SystemExit("no online documents available; keep using the offline corpus")
+
+    for row in rows:
+        path = Path(row["path"])
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+    rows = [row for row in rows if Path(row["path"]).stat().st_size >= args.min_chars]
+    if not rows:
+        raise SystemExit("online manifest exists but cached page files are missing")
 
     rng = random.Random(args.seed)
     shuffled = rows[:]
@@ -228,7 +230,7 @@ def main() -> int:
     (out / "train.txt").write_text("\n".join(train_parts), encoding="utf-8")
     (out / "val.txt").write_text("\n".join(val_parts), encoding="utf-8")
     metadata = {
-        "schema": "gemmaagent.online-corpus.v1",
+        "schema": "gemmaagent.online-corpus.v2",
         "generated_at_unix": int(time.time()),
         "api": API,
         "license": LICENSE,
@@ -240,7 +242,10 @@ def main() -> int:
         "val_characters": sum(len(x) for x in val_parts),
     }
     manifest_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"online corpus: pages={len(rows)} train_chars={metadata['train_characters']} val_chars={metadata['val_characters']}")
+    print(
+        f"online corpus: pages={len(rows)} train_chars={metadata['train_characters']} "
+        f"val_chars={metadata['val_characters']} refresh={args.refresh}"
+    )
     return 0
 
 
