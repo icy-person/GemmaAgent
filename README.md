@@ -4,8 +4,6 @@
 
 ## سه backend اصلی
 
-پروژه دقیقاً سه مسیر اجرایی دارد:
-
 | Backend | هدف | فناوری | خروجی اصلی |
 |---|---|---|---|
 | `runner-cpu` | GitHub Actions / CPU runner | Rust scalar CPU + Autograd | آموزش کامل و قابل resume |
@@ -20,7 +18,7 @@
 - causal multi-head self-attention و FFN با SiLU در مسیر CPU
 - tokenizer بایتی برای profile کوچک و tokenizer subword آموخته‌شده برای profileهای بزرگ
 - byte fallback و ذخیره/بازیابی tokenizer
-- next-token cross-entropy با نمونه‌گیری کنترل‌شده از موقعیت‌های context در CPU
+- next-token cross-entropy با نمونه‌گیری بدون تکرار از موقعیت‌های context در CPU
 - next-token cross-entropy روی تمام موقعیت‌های causal در backend GPU
 - AdamW، gradient clipping و warmup/cosine schedule
 - train/validation split و validation perplexity
@@ -33,7 +31,7 @@
 - SwiGLU feed-forward
 - gradient accumulation با GradientsAccumulator
 - KV-cache واقعی برای prefill و incremental decoding
-- نرمال‌سازی صحیح sampled CPU loss، طوری که loss دقیقاً بر تعداد targetهای واقعاً مصرف‌شده تقسیم می‌شود
+- CPU LR scheduler پیشرفتهٔ warmup→cosine
 
 ## پروفایل‌ها
 
@@ -59,22 +57,24 @@ cargo run --release --no-default-features --features runner-cpu --bin cpu-train 
   --checkpoint checkpoints/gemma-agent.cpu.ckpt \
   --tokenizer checkpoints/gemma-agent.cpu.ckpt.tok \
   --grad-accum 8 \
-  --targets-per-step 128 \
-  --eval-samples 16 \
+  --targets-per-step 256 \
+  --warmup 100 \
+  --min-lr-ratio 0.1 \
   --lr 0.0002 \
   --checkpoint-every 25
 ```
 
-checkpoint کامل شامل وزن، optimizer state، RNG و tokenizer است. trainer از checkpoint قبلی resume می‌کند و loss sampled را با تعداد واقعی targetها نرمال می‌کند.
+`targets-per-step` اکنون targetهای causal یکتا را انتخاب می‌کند و با افزایش آن، گرادیان نمایندهٔ بهتری از کل context می‌شود. `warmup` و `min-lr-ratio` روی LR scheduler اعمال می‌شوند. checkpoint کامل شامل وزن، optimizer state، RNG و tokenizer است.
 
 ## آموزش با اینترنت و corpus آنلاین
 
-Pipeline آموزشی اکنون یک مرحلهٔ آنلاین دارد که از **Wikimedia/Wikipedia** دادهٔ متنی می‌گیرد. این جمع‌آوری یک crawler آزاد نیست؛ دامنه و API مشخص است، درخواست‌ها rate-limited هستند، داده cache می‌شود و برای هر صفحه title، URL، revision id، hash و license داخل `data/online_manifest.json` ثبت می‌شود. برای درخواست‌های ماشینی به Wikimedia، User-Agent توصیفی و رعایت throttling ضروری است. urlراهنمای API Policy و User-Agent و TextExtractshttps://meta.wikimedia.org/wiki/API_Policy_Update_2024/en
+Pipeline آموزشی یک مرحلهٔ آنلاین دارد که از **Wikimedia/Wikipedia** دادهٔ متنی می‌گیرد. این جمع‌آوری crawler آزاد نیست؛ دامنه و API مشخص است، درخواست‌ها rate-limited هستند، داده cache می‌شود و برای هر صفحه title، URL، revision id، hash و license داخل `data/online_manifest.json` ثبت می‌شود. برای درخواست‌های ماشینی به Wikimedia، User-Agent توصیفی و رعایت throttling ضروری است. urlراهنمای API Policy و User-Agent و TextExtractshttps://meta.wikimedia.org/wiki/API_Policy_Update_2024/en
 
 اجرای محلی:
 
 ```bash
 python3 scripts/prepare_online_corpus.py \
+  --refresh \
   --pages-per-topic 12 \
   --max-pages 160 \
   --min-chars 300 \
@@ -90,79 +90,69 @@ data/online/pages/
 data/online_manifest.json
 ```
 
-برای ساخت tokenizer اولیه، pipeline ترکیبی از corpus آفلاین و آنلاین را به `data/bootstrap.txt` می‌سازد. بعد از ساخته‌شدن tokenizer، همان tokenizer از checkpoint ادامه پیدا می‌کند و تغییرات وزن مدل روی مرحلهٔ آنلاین نیز اعمال می‌شود.
+برای ساخت tokenizer اولیه، pipeline ترکیبی از corpus آفلاین و آنلاین را به `data/bootstrap.txt` می‌سازد. بعد از ساخته‌شدن tokenizer، tokenizer ثابت می‌ماند تا checkpoint قبلی با واژگان متفاوت خراب نشود.
 
 چرخهٔ آموزش GitHub Actions شامل این مراحل است:
 
 `bootstrap -> literature -> code -> math -> reasoning -> balanced -> online-wikipedia -> repeat`
 
-مرحلهٔ آنلاین از `data/online/train.txt` و validation متناظر خودش استفاده می‌کند؛ بنابراین مدل فقط روی دادهٔ آنلاین train نمی‌شود و دچار drift شدید به سمت یک منبع واحد نمی‌شود.
+مرحلهٔ آنلاین از `data/online/train.txt` و validation متناظر خودش استفاده می‌کند؛ بنابراین مدل فقط روی دادهٔ آنلاین train نمی‌شود و drift شدید به سمت یک منبع واحد کمتر می‌شود.
 
-اجرای دستی یک دور آنلاین:
+## Laptop / AMD Vulkan — آموزش واقعی روی GPU
 
-```bash
-cargo run --release --no-default-features --features runner-cpu --bin cpu-train -- \
-  --large \
-  --steps 500 \
-  --data data/online/train.txt \
-  --val-data data/online/val.txt \
-  --checkpoint checkpoints/gemma-agent.cpu.ckpt \
-  --tokenizer checkpoints/gemma-agent.cpu.ckpt.tok \
-  --resume checkpoints/gemma-agent.cpu.ckpt \
-  --train-context 512 \
-  --grad-accum 8 \
-  --targets-per-step 128 \
-  --eval-samples 16 \
-  --lr 0.00006
-```
+GitHub-hosted runner به GPU واقعی AMD کاربر دسترسی ندارد. برای training واقعی روی Radeon، یک **self-hosted GitHub runner** با labelهای `self-hosted`, `linux`, `amd-vulkan` آماده شده است.
 
-دادهٔ آنلاین به‌صورت artifact نیز کنار checkpoint ذخیره می‌شود تا اجرای بعدی بتواند cache را بازیابی کند. خود corpus generated در git commit نمی‌شود.
-
-## Laptop / AMD Vulkan
-
-برای Radeon روی لینوکس، مسیر `amd-vulkan` با **Burn + WGPU + Vulkan** اجرا می‌شود.
-
-بررسی GPU:
+بعد از نصب runner روی لپ‌تاپ:
 
 ```bash
 vulkaninfo --summary
 lspci | grep -Ei 'vga|3d|display'
 ```
 
-build و آموزش:
+Workflow `Train GemmaAgent AMD Vulkan` را از GitHub Actions به‌صورت دستی اجرا کن. پارامترهای پیش‌فرض برای دستگاه‌های کم‌حافظه محافظه‌کارانه‌اند:
+
+```text
+profile=target-19,275,776
+batch-size=2
+grad-accum=2
+gpu-util=100
+```
+
+برای **بیشترین سرعت** `gpu-util=100` استفاده می‌شود. مقدار `50` فقط duty-cycle تقریبی workload را پایین می‌آورد و باعث سریع‌تر شدن آموزش نمی‌شود.
+
+برای اجرای مستقیم محلی:
 
 ```bash
 cargo build --release --no-default-features --features amd-vulkan --bin amd-train
 cargo run --release --no-default-features --features amd-vulkan --bin amd-train -- \
   --target \
   --steps 20000 \
-  --data ./train.txt \
-  --checkpoint gemma-agent-target-amd.bin \
-  --best-checkpoint gemma-agent-target-amd.bin.best \
-  --tokenizer gemma-agent-target-amd.bin.tok \
-  --batch-size 1 \
-  --grad-accum 1 \
-  --lr 0.0003 \
+  --data data/online/train.txt \
+  --checkpoint checkpoints/gemma-agent-target-amd.bin \
+  --best-checkpoint checkpoints/gemma-agent-target-amd.bin.best \
+  --tokenizer checkpoints/gemma-agent-target-amd.bin.tok \
+  --batch-size 2 \
+  --grad-accum 2 \
+  --lr 0.00015 \
   --checkpoint-every 250 \
   --eval-every 250 \
   --gpu-kind integrated \
-  --gpu 0
+  --gpu 0 \
+  --gpu-util 100
 ```
 
-برای انتخاب خودکار GPU از `--gpu-kind best` استفاده می‌شود. `--gpu-util 50` duty-cycle تقریبی workload را محدود می‌کند؛ این مقدار محدودکنندهٔ سخت‌افزاری driver نیست.
+scheduler AMD از قبل warmup + cosine و gradient clipping دارد و loss روی تمام tokenهای batch محاسبه می‌شود. برای throughput بالاتر، اول `batch-size` را تا مرز امن حافظه بالا ببر، سپس از `grad-accum` استفاده کن.
 
 benchmark:
 
 ```bash
 cargo run --release --no-default-features --features amd-vulkan --bin amd-bench -- \
-  --batch-size 1 \
+  --batch-size 2 \
   --context 256 \
   --iterations 50 \
   --gpu-kind integrated \
   --gpu 0
 ```
-
-برای throughput بالاتر، افزایش `batch-size` و سپس استفاده از `grad-accum` روی دستگاه دارای حافظهٔ کافی مناسب‌تر از syncهای زیاد با batch=1 است.
 
 ## Android / Vulkan
 
@@ -187,7 +177,7 @@ cargo ndk -t arm64-v8a build --release --no-default-features --features android-
   --top-k 40
 ```
 
-این backend در CI به‌صورت مستقل برای `aarch64-linux-android` compile-check می‌شود؛ اجرای Vulkan روی یک گوشی واقعی باید روی همان دستگاه benchmark شود.
+این backend برای **inference** طراحی شده و CI آن را برای `aarch64-linux-android` compile-check می‌کند؛ آموزش روی Android در این نسخه فعال نشده است چون مسیر فعلی optimizer/training به عنوان desktop/runner workload طراحی شده است.
 
 ## معماری مشترک Vulkan
 
@@ -221,9 +211,9 @@ cargo check --target aarch64-linux-android --no-default-features --features andr
 
 ## سرعت و حافظه
 
-روی لپ‌تاپ 8GB RAM، `batch-size=1` نقطهٔ شروع امن است و `grad-accum` برای افزایش batch مؤثر استفاده می‌شود. backend Vulkan فعلاً F32 است تا correctness و پایداری اولویت داشته باشند.
+روی لپ‌تاپ 8GB RAM، برای CPU `grad-accum=8` و برای AMD `batch-size=2, grad-accum=2` نقطهٔ شروع محافظه‌کارانه هستند. backend Vulkan فعلاً F32 است تا correctness و پایداری اولویت داشته باشند.
 
-در مسیر CPU، `targets-per-step` هزینهٔ هر forward/backward را کنترل می‌کند. برای شروع پایدار `128` مناسب است؛ اگر زمان هر update زیاد شد، این عدد را پایین بیاور و با `grad-accum` تعداد updateهای مؤثر را حفظ کن.
+برای رسیدن هم‌زمان به سرعت و دقت بیشتر، ترتیب بهینه‌سازی این پروژه این است: افزایش throughput با batch/fusion، افزایش diversity داده، target sampling یکتا در CPU، warmup/cosine LR، validation منظم، و ادامهٔ آموزش از checkpoint به‌جای شروع دوباره.
 
 ## کیفیت مدل
 
@@ -237,10 +227,10 @@ CI سه مسیر را مستقل بررسی می‌کند:
 2. `Laptop / AMD Vulkan backend`
 3. `Android / arm64 Vulkan backend`
 
-همچنین CI یک build با دو backend هم‌زمان را عمداً امتحان می‌کند و انتظار دارد `build.rs` آن را رد کند. GitHub-hosted runner سخت‌افزار Radeon یا GPU موبایل کاربر را شبیه‌سازی نمی‌کند؛ بنابراین benchmark نهایی باید روی دستگاه واقعی انجام شود.
+همچنین CI یک build با دو backend هم‌زمان را عمداً امتحان می‌کند و انتظار دارد `build.rs` آن را رد کند. GitHub-hosted runner سخت‌افزار Radeon یا GPU موبایل کاربر را شبیه‌سازی نمی‌کند؛ بنابراین benchmark نهایی AMD باید روی دستگاه واقعی انجام شود.
 
-Workflow آموزش CPU نیز به اینترنت متصل است، corpus آنلاین را refresh می‌کند، manifest آن را validate می‌کند و سپس مرحلهٔ `online-wikipedia` را در curriculum اجرا می‌کند.
+Workflow آموزش CPU به اینترنت متصل است، corpus آنلاین را refresh می‌کند، manifest آن را validate می‌کند و مرحلهٔ `online-wikipedia` را در curriculum اجرا می‌کند. Workflow جداگانهٔ AMD نیز همین corpus را روی GPU واقعی self-hosted آموزش می‌دهد.
 
 ## وضعیت فعلی
 
-پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. هر build فقط یک backend runtime دارد، backendهای GPU بر پایهٔ Vulkan هستند، GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند، و pipeline آموزش CPU اکنون علاوه بر corpus آفلاین از یک corpus آنلاینِ قابل‌ردیابی و cache‌شده نیز استفاده می‌کند.
+پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. هر build فقط یک backend runtime دارد، backendهای GPU بر پایهٔ Vulkan هستند، GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند، CPU training scheduler و sampling بهینه‌تری دارد، و pipeline آموزش علاوه بر corpus آفلاین از corpus آنلاینِ قابل‌ردیابی و cache‌شده نیز استفاده می‌کند.
