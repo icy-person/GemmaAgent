@@ -1,1 +1,0 @@
-CPU backend binaries live in this directory and are declared explicitly in Cargo.toml.
