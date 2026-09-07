@@ -1,40 +1,6 @@
-mod autograd;
-mod config;
-mod model;
-mod tensor;
-mod tokenizer;
-
-use autograd::Value;
-use config::Config;
-use model::Model;
-use tokenizer::ByteTokenizer;
-
-fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0)
-}
-
-fn main() {
-    let config = Config::default();
-    println!("gemma-rs: Rust language model foundation");
-    println!("architecture: decoder-only Transformer");
-    println!("layers: {} | d_model: {} | heads: {} | FFN: {}", config.n_layers, config.d_model, config.n_heads, config.ffn_dim);
-    println!("context: {} tokens | vocabulary: {}", config.context, config.vocab_size);
-    println!("parameters (approx): {:.2}M", config.parameter_count() as f64 / 1_000_000.0);
-
-    let tokenizer = ByteTokenizer::new();
-    let prompt = "Hello, Rust";
-    let tokens = tokenizer.encode(prompt, true, false);
-    println!("prompt: {prompt:?}");
-    println!("tokens: {}", tokens.len());
-
-    let model = Model::new(config, 42);
-    let logits = model.forward(&tokens);
-    let next = argmax(&logits);
-    println!("next token id: {next}");
-
-    let a = Value::leaf(1, 2, vec![2.0, 3.0]);
-    let b = Value::leaf(2, 1, vec![5.0, 7.0]);
-    let y = a.matmul(&b);
-    y.backward();
-    println!("autograd check: y={:?}, da={:?}, db={:?}", y.data(), a.grad(), b.grad());
-}
+mod autograd;mod checkpoint;mod config;mod model;mod optim;mod tokenizer;use autograd::Value;use config::Config;use model::Model;use optim::AdamW;use tokenizer::Tokenizer;
+fn argmax(v:&[f32])->usize{v.iter().enumerate().max_by(|a,b|a.1.total_cmp(b.1)).map(|(i,_)|i).unwrap_or(0)}
+fn loss(model:&Model,input:&[usize],target:usize)->Value{model.logits(&model.forward_hidden(input)).softmax().gather(target).log().neg()}
+fn train(steps:usize,path:&str){let c=Config::debug();println!("GemmaAgent: {} params | context {} | {} heads",c.params(),c.context,c.heads);let tok=Tokenizer::new();let d=tok.encode(&tokenizer::tiny_corpus());let m=Model::new(c,42);let p=m.parameters();let mut opt=AdamW::new(.002);for s in 1..=steps{let start=1+s%(d.len()-c.context-2);let l=loss(&m,&d[start..start+c.context],d[start+c.context]);let x=l.data()[0];l.backward();opt.step(&p);if s==1||s%25==0{println!("step {s:4} loss {x:.5}");}}checkpoint::save(path,&p).expect("save failed");println!("checkpoint: {path}");}
+fn infer(path:&str,prompt:&str){let c=Config::debug();let tok=Tokenizer::new();let m=Model::new(c,42);let p=m.parameters();if std::path::Path::new(path).exists(){checkpoint::load(path,&p).expect("load failed");}let mut ids=tok.encode(prompt);ids.pop();for _ in 0..64{let b=ids.len().saturating_sub(c.context);let h=m.forward_hidden(&ids[b..]);let n=argmax(&m.logits(&h).data());ids.push(n);if n==tokenizer::EOS{break;}}println!("{}",tok.decode(&ids));}
+fn main(){let a:Vec<String>=std::env::args().collect();match a.get(1).map(String::as_str){Some("train")=>train(a.get(2).and_then(|x|x.parse().ok()).unwrap_or(300),a.get(3).map(String::as_str).unwrap_or("gemma-agent.ckpt")),Some("infer")=>infer(a.get(2).map(String::as_str).unwrap_or("gemma-agent.ckpt"),a.get(3).map(String::as_str).unwrap_or("Rust is")),_=>{println!("GemmaAgent Rust LLM");println!("cargo test");println!("cargo run --release -- train 300");println!("cargo run --release -- infer gemma-agent.ckpt \"Rust is\"");println!("target config: {} params",Config::target().params());}}}
