@@ -80,14 +80,14 @@ fn main() {
         .load_file(&checkpoint, &recorder, &device)
         .unwrap_or_else(|e| panic!("failed to load checkpoint '{checkpoint}': {e}"));
 
-    let encoded = if cfg.vocab == config::Config::target().vocab {
+    let target_tokenizer = cfg.vocab == config::Config::target().vocab;
+    let mut tokens = if target_tokenizer {
         let tok = amd_tokenizer::AmdTokenizer::load(&tokenizer_path)
             .unwrap_or_else(|e| panic!("failed to load tokenizer '{tokenizer_path}': {e}"));
         tok.encode(&prompt)
     } else {
         tokenizer::Tokenizer::new().encode(&prompt)
     };
-    let mut tokens = encoded;
     let _ = tokens.pop();
     assert!(!tokens.is_empty(), "prompt must contain at least one token");
     assert!(tokens.len() <= cfg.context, "prompt exceeds configured context");
@@ -108,12 +108,17 @@ fn main() {
             .expect("failed to read logits from Vulkan device");
         let next = argmax(&values);
         tokens.push(next);
-        if next == amd_tokenizer::EOS || next == tokenizer::EOS || tokens.len() >= cfg.context {
+        let finished = if target_tokenizer {
+            next == amd_tokenizer::EOS
+        } else {
+            next == tokenizer::EOS
+        };
+        if finished || tokens.len() >= cfg.context {
             break;
         }
     }
 
-    if cfg.vocab == config::Config::target().vocab {
+    if target_tokenizer {
         let tok = amd_tokenizer::AmdTokenizer::load(&tokenizer_path)
             .unwrap_or_else(|e| panic!("failed to load tokenizer '{tokenizer_path}': {e}"));
         println!("{}", tok.decode(&tokens));
