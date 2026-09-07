@@ -6,6 +6,14 @@ authors=["icy-person"]
 description="A clean-room educational language model implemented in Rust"
 license="MIT"
 
+[features]
+default=[]
+cuda=["dep:candle-core","dep:candle-nn","candle-core/cuda","candle-nn/cuda"]
+
+[dependencies]
+candle-core={version="0.11.0",default-features=false,optional=true}
+candle-nn={version="0.11.0",default-features=false,optional=true}
+
 [profile.release]
 opt-level=3
 lto=true
