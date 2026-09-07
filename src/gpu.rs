@@ -184,33 +184,31 @@ pub fn train(
     steps: usize,
     checkpoint: &str,
     data_path: &str,
+    cfg: Config,
     batch_size: usize,
+    grad_accum: usize,
     lr: f64,
     checkpoint_every: usize,
     gpu_index: usize,
 ) -> Result<()> {
-    assert!(steps > 0);
-    assert!(batch_size > 0);
+    assert!(steps > 0 && batch_size > 0 && grad_accum > 0);
     assert!(lr.is_finite() && lr > 0.0);
 
     let device = Device::new_cuda(gpu_index)?;
     println!("GPU backend: CUDA device {gpu_index}");
     println!("GPU training uses Candle CUDA tensors/autograd and AdamW");
 
-    let cfg = Config::debug();
     let tokenizer = Tokenizer::new();
-    let corpus = std::fs::read_to_string(data_path)
-        .map_err(candle_core::Error::wrap)?;
+    let corpus = std::fs::read_to_string(data_path).map_err(candle_core::Error::wrap)?;
     let encoded = tokenizer.encode(&corpus);
     assert!(encoded.len() > cfg.context + 1);
 
     println!(
-        "GemmaAgent GPU: {} params + RMSNorm | context {} | heads {} | batch {} | lr {:.6}",
+        "GemmaAgent GPU: {} params + RMSNorm gains | context {} | heads {} | batch {} | grad-accum {} | lr {:.6}",
         cfg.params() + cfg.d_model * (2 * cfg.layers + 1),
-        cfg.context, cfg.heads, batch_size, lr
+        cfg.context, cfg.heads, batch_size, grad_accum, lr
     );
     println!("training corpus: {} bytes from {data_path}", corpus.len());
-    println!("checkpoint format: Candle safetensors -> {checkpoint}");
 
     let (varmap, model) = load_or_init(cfg, &device, checkpoint)?;
     let vars = varmap.all_vars();
@@ -227,24 +225,32 @@ pub fn train(
 
     let mut loss_total = 0.0f64;
     let mut last = Instant::now();
-    for step in 0..steps {
-        let (xs, ys) = make_batch(&encoded, cfg.context, batch_size, step, &device)?;
-        let logits = model.forward_logits(&xs)?;
-        let flat_logits = logits.reshape((batch_size * cfg.context, cfg.vocab))?;
-        let flat_targets = ys.flatten_all()?;
-        let loss = cross_entropy(&flat_logits, &flat_targets)?;
-        let loss_value = loss.to_scalar::<f32>()? as f64;
-        loss_total += loss_value;
-        optimizer.backward_step(&loss)?;
+    for update in 0..steps {
+        let mut grad_store = candle_core::backprop::GradStore::new();
+        let mut update_loss = 0.0f64;
+        for micro in 0..grad_accum {
+            let logical_step = update * grad_accum + micro;
+            let (xs, ys) = make_batch(&encoded, cfg.context, batch_size, logical_step, &device)?;
+            let logits = model.forward_logits(&xs)?;
+            let flat_logits = logits.reshape((batch_size * cfg.context, cfg.vocab))?;
+            let flat_targets = ys.flatten_all()?;
+            let loss = cross_entropy(&flat_logits, &flat_targets)?;
+            update_loss += loss.to_scalar::<f32>()? as f64;
+            let scaled = loss.affine(1.0 / grad_accum as f64, 0.0)?;
+            let grads = scaled.backward()?;
+            grad_store.extend(grads)?;
+        }
+        optimizer.step(&grad_store)?;
+        loss_total += update_loss / grad_accum as f64;
 
-        if step % 10 == 9 || step + 1 == steps {
+        if update % 10 == 9 || update + 1 == steps {
             let elapsed = last.elapsed().as_secs_f64().max(f64::MIN_POSITIVE);
-            let samples = 10.min(step + 1);
+            let samples = 10.min(update + 1);
             let avg = loss_total / samples as f64;
-            let tokens = (batch_size * cfg.context * samples) as f64;
+            let tokens = (batch_size * cfg.context * grad_accum * samples) as f64;
             println!(
-                "gpu step {:5} loss {:.5} | {:.0} tok/s",
-                step + 1,
+                "gpu update {:5} loss {:.5} | {:.0} tok/s",
+                update + 1,
                 avg,
                 tokens / elapsed
             );
@@ -252,9 +258,9 @@ pub fn train(
             last = Instant::now();
         }
 
-        if checkpoint_every > 0 && (step + 1) % checkpoint_every == 0 {
+        if checkpoint_every > 0 && (update + 1) % checkpoint_every == 0 {
             varmap.save(checkpoint)?;
-            println!("GPU checkpoint: {checkpoint} (step {})", step + 1);
+            println!("GPU checkpoint: {checkpoint} (update {})", update + 1);
         }
     }
 
@@ -264,11 +270,16 @@ pub fn train(
     Ok(())
 }
 
-pub fn benchmark(gpu_index: usize, batch_size: usize, context: usize, iters: usize) -> Result<()> {
+pub fn benchmark(
+    gpu_index: usize,
+    cfg: Config,
+    batch_size: usize,
+    context: usize,
+    iters: usize,
+) -> Result<()> {
     assert!(batch_size > 0 && context > 0 && iters > 0);
-    let device = Device::new_cuda(gpu_index)?;
-    let cfg = Config::debug();
     assert!(context <= cfg.context);
+    let device = Device::new_cuda(gpu_index)?;
     let (_varmap, model) = build_varmap(cfg, &device)?;
 
     let ids = Tensor::zeros((batch_size, context), DType::U32, &device)?;
@@ -284,7 +295,7 @@ pub fn benchmark(gpu_index: usize, batch_size: usize, context: usize, iters: usi
     let secs = start.elapsed().as_secs_f64();
     let tok_per_sec = (batch_size * context * iters) as f64 / secs.max(f64::MIN_POSITIVE);
     println!("GPU benchmark: CUDA device {gpu_index}");
-    println!("batch {batch_size} | context {context} | iterations {iters}");
+    println!("{} params | batch {batch_size} | context {context} | iterations {iters}", cfg.params());
     println!("forward throughput: {:.0} tok/s", tok_per_sec);
     Ok(())
 }
@@ -298,6 +309,22 @@ mod tests {
         let cfg = Config::debug();
         assert_eq!(cfg.head_dim() % 2, 0);
         assert_eq!(cfg.vocab, 258);
+    }
+
+    #[test]
+    fn gpu_cpu_forward_backward_smoke() -> Result<()> {
+        let cfg = Config::debug();
+        let device = Device::Cpu;
+        let (varmap, model) = build_varmap(cfg, &device)?;
+        let ids = Tensor::from_vec(vec![256u32, 82, 117, 115, 116], (1, 5), &device)?;
+        let targets = Tensor::from_vec(vec![82u32, 117, 115, 116, 32], (1, 5), &device)?;
+        let logits = model.forward_logits(&ids)?.reshape((5, cfg.vocab))?;
+        let loss = cross_entropy(&logits, &targets.flatten_all()?)?;
+        assert!(loss.to_scalar::<f32>()?.is_finite());
+        let grads = loss.backward()?;
+        assert!(!varmap.all_vars().is_empty());
+        assert!(!grads.is_empty());
+        Ok(())
     }
 
     #[test]
