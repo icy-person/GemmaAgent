@@ -21,14 +21,20 @@ fn parse_usize(args: &[String], name: &str, default: usize) -> usize {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: cargo run --release --features cuda --bin gpu-bench -- --batch-size 8 --context 128 --iterations 100 --gpu 0");
+        println!("Usage: cargo run --release --features cuda --bin gpu-bench -- [--target] --batch-size 8 --context 128 --iterations 100 --gpu 0");
         return;
     }
     let batch_size = parse_usize(&args, "--batch-size", 8);
-    let context = parse_usize(&args, "--context", 128);
+    let default_context = if args.iter().any(|a| a == "--target") { 1024 } else { 128 };
+    let context = parse_usize(&args, "--context", default_context);
     let iterations = parse_usize(&args, "--iterations", 100);
     let gpu = parse_usize(&args, "--gpu", 0);
-    if let Err(err) = gpu::benchmark(gpu, batch_size, context, iterations) {
+    let cfg = if args.iter().any(|a| a == "--target") {
+        config::Config::target()
+    } else {
+        config::Config::debug()
+    };
+    if let Err(err) = gpu::benchmark(gpu, cfg, batch_size, context, iterations) {
         eprintln!("GPU benchmark failed: {err}");
         std::process::exit(1);
     }
