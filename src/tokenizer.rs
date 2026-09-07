@@ -46,7 +46,7 @@ impl Tokenizer {
                 if piece.iter().all(|b| !b.is_ascii_control()) { *counts.entry(piece.to_vec()).or_default() += 1; }
             }
         }
-        let mut candidates: Vec<(Vec<u8>, u64)> = counts.into_iter().filter(|(piece, count)| piece.len() >= 2 && *count >= 2 && piece.len() <= 64).map(|(piece, count)| (piece, u64::from(count) * piece.len().saturating_sub(1) as u64)).collect();
+        let mut candidates: Vec<(Vec<u8>, u64)> = counts.into_iter().filter(|(piece, count)| piece.len() >= 2 && *count >= 2 && piece.len() <= 64).map(|(piece, count)| { let len = piece.len(); (piece, u64::from(count) * len.saturating_sub(1) as u64) }).collect();
         candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.len().cmp(&a.0.len())).then_with(|| a.0.cmp(&b.0)));
         candidates.truncate(learned_limit);
         for (offset, (piece, _)) in candidates.into_iter().enumerate() { tokenizer.pieces[FIRST_LEARNED_ID + offset] = piece; }
