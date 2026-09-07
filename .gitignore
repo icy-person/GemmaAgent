@@ -1,3 +1,4 @@
 /target/
 *.ckpt
 *.safetensors
+*.bin
