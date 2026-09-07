@@ -98,7 +98,12 @@ impl Model {
         block.o.forward(&Value::concat_cols(&heads))
     }
 
-    pub fn forward_hidden(&self, tokens: &[usize]) -> Value {
+    /// Return the hidden state at every causal position.
+    ///
+    /// Keeping the complete sequence here lets the training loop supervise
+    /// multiple next-token targets from one forward graph instead of training
+    /// only on the final position of every context window.
+    pub fn forward_all_hidden(&self, tokens: &[usize]) -> Vec<Value> {
         assert!(!tokens.is_empty() && tokens.len() <= self.cfg.context);
         let mut states: Vec<Value> = tokens
             .iter()
@@ -127,7 +132,13 @@ impl Model {
             states = next;
         }
 
-        states.pop().expect("non-empty token sequence")
+        states
+    }
+
+    pub fn forward_hidden(&self, tokens: &[usize]) -> Value {
+        self.forward_all_hidden(tokens)
+            .pop()
+            .expect("non-empty token sequence")
     }
 
     pub fn logits(&self, hidden: &Value) -> Value {
@@ -170,6 +181,16 @@ mod tests {
         let hidden = model.forward_hidden(&[256, b'R' as usize, b'u' as usize]);
         assert_eq!(hidden.shape(), (1, cfg.d_model));
         assert_eq!(model.logits(&hidden).shape(), (1, cfg.vocab));
+    }
+
+    #[test]
+    fn forward_all_hidden_returns_every_position() {
+        let cfg = Config::debug();
+        let model = Model::new(cfg, 42);
+        let hidden = model.forward_all_hidden(&[256, 65, 66, 67]);
+        assert_eq!(hidden.len(), 4);
+        assert!(hidden.iter().all(|value| value.shape() == (1, cfg.d_model)));
+        assert_eq!(hidden[3].data(), model.forward_hidden(&[256, 65, 66, 67]).data());
     }
 
     #[test]
