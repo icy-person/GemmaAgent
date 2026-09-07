@@ -13,7 +13,7 @@ on:
       stage_steps:
         description: "Optimizer steps per curriculum stage"
         required: true
-        default: "200"
+        default: "100"
         type: string
       runtime_minutes:
         description: "Train continuously for this many minutes"
@@ -28,7 +28,12 @@ on:
       targets_per_step:
         description: "Token positions sampled from each context"
         required: true
-        default: "32"
+        default: "64"
+        type: string
+      eval_samples:
+        description: "Held-out validation windows after each stage"
+        required: true
+        default: "8"
         type: string
 
   schedule:
@@ -60,6 +65,22 @@ jobs:
             sudo apt-get install -y --no-install-recommends python3 ca-certificates curl jq
           fi
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-cpu-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-cpu-
+
       - name: Restore latest checkpoint artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,9 +88,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p checkpoints
-          previous_run="$(gh run list --workflow train.yml --limit 20 --json databaseId --jq ".[] | select(.databaseId != ${GITHUB_RUN_ID}) | .databaseId" | head -n 1 || true)"
+          previous_run="$(gh run list --workflow train.yml --status success --limit 20 --json databaseId --jq ".[] | select(.databaseId != ${GITHUB_RUN_ID}) | .databaseId" | head -n 1 || true)"
           if [[ -n "$previous_run" ]]; then
-            echo "Trying previous training run: $previous_run"
+            echo "Trying previous successful training run: $previous_run"
             if gh run download "$previous_run" --name gemmaagent-cpu-checkpoint --dir checkpoints; then
               find checkpoints -maxdepth 2 -type f -print
             else
@@ -101,14 +122,16 @@ jobs:
         run: |
           set -u
           mkdir -p checkpoints run-report
-          STAGE_STEPS="${{ inputs.stage_steps || '200' }}"
+          STAGE_STEPS="${{ inputs.stage_steps || '100' }}"
           RUNTIME_MINUTES="${{ inputs.runtime_minutes || '330' }}"
           GRAD_ACCUM="${{ inputs.grad_accum || '8' }}"
-          TARGETS_PER_STEP="${{ inputs.targets_per_step || '32' }}"
+          TARGETS_PER_STEP="${{ inputs.targets_per_step || '64' }}"
+          EVAL_SAMPLES="${{ inputs.eval_samples || '8' }}"
           DEADLINE=$(( $(date +%s) + RUNTIME_MINUTES * 60 ))
           CHECKPOINT="checkpoints/gemma-agent.cpu.ckpt"
           LOG="run-report/training.log"
           stage=0
+
           while (( $(date +%s) < DEADLINE )); do
             stage=$((stage + 1))
             case $((stage % 5)) in
@@ -119,52 +142,67 @@ jobs:
               0) DOMAIN="05-balanced";   LR="0.00008" ;;
             esac
             DATA="data/curriculum/${DOMAIN}.txt"
-            echo "===== curriculum stage ${stage}: ${DOMAIN}, lr=${LR} =====" | tee -a "$LOG"
+            echo "===== curriculum stage ${stage}: ${DOMAIN}, profile=large, lr=${LR} =====" | tee -a "$LOG"
+
+            CMD=(./target/release/cpu-train --large
+              --steps "$STAGE_STEPS"
+              --data "$DATA"
+              --val-data data/val.txt
+              --checkpoint "$CHECKPOINT"
+              --grad-accum "$GRAD_ACCUM"
+              --targets-per-step "$TARGETS_PER_STEP"
+              --eval-samples "$EVAL_SAMPLES"
+              --lr "$LR"
+              --checkpoint-every 25)
 
             if [[ -s "$CHECKPOINT" ]]; then
-              set +e
-              ./target/release/cpu-train \
-                --target \
-                --steps "$STAGE_STEPS" \
-                --data "$DATA" \
-                --checkpoint "$CHECKPOINT" \
-                --resume "$CHECKPOINT" \
-                --grad-accum "$GRAD_ACCUM" \
-                --targets-per-step "$TARGETS_PER_STEP" \
-                --lr "$LR" \
-                --checkpoint-every 100 \
-                2>&1 | tee -a "$LOG"
-              rc=${PIPESTATUS[0]}
-              set -e
-              if [[ "$rc" -ne 0 ]]; then
-                echo "Resume failed; discarding incompatible checkpoint and restarting this stage." | tee -a "$LOG"
+              CMD+=(--resume "$CHECKPOINT")
+            fi
+
+            set +e
+            "${CMD[@]}" 2>&1 | tee -a "$LOG"
+            rc=${PIPESTATUS[0]}
+            set -e
+
+            if [[ "$rc" -ne 0 ]]; then
+              if [[ -s "$CHECKPOINT" ]]; then
+                echo "Resume failed; checkpoint is incompatible/corrupt. Removing it and restarting this stage with the large profile." | tee -a "$LOG"
                 rm -f "$CHECKPOINT"
+                ./target/release/cpu-train --large \
+                  --steps "$STAGE_STEPS" \
+                  --data "$DATA" \
+                  --val-data data/val.txt \
+                  --checkpoint "$CHECKPOINT" \
+                  --grad-accum "$GRAD_ACCUM" \
+                  --targets-per-step "$TARGETS_PER_STEP" \
+                  --eval-samples "$EVAL_SAMPLES" \
+                  --lr "$LR" \
+                  --checkpoint-every 25 2>&1 | tee -a "$LOG"
               else
-                continue
+                echo "Training stage failed without a checkpoint; stopping so the run fails loudly." | tee -a "$LOG"
+                exit "$rc"
               fi
             fi
 
-            ./target/release/cpu-train \
-              --target \
-              --steps "$STAGE_STEPS" \
-              --data "$DATA" \
-              --checkpoint "$CHECKPOINT" \
-              --grad-accum "$GRAD_ACCUM" \
-              --targets-per-step "$TARGETS_PER_STEP" \
-              --lr "$LR" \
-              --checkpoint-every 100 \
-              2>&1 | tee -a "$LOG"
+            last_val="$(grep 'validation_loss=' "$LOG" | tail -n 1 | sed -n 's/.*validation_loss=\([0-9.]*\).*/\1/p')"
+            if [[ -n "$last_val" ]]; then
+              echo "latest_validation_loss=$last_val" | tee -a "$LOG"
+              awk "BEGIN { if ($last_val < 1.0) exit 0; else exit 1 }" && echo "GOAL_REACHED: validation loss < 1.0" | tee -a "$LOG" || true
+            fi
           done
 
           cat > run-report/run-info.txt <<EOF
           commit=${GITHUB_SHA}
           run_id=${GITHUB_RUN_ID}
           runner=${RUNNER_NAME}
+          profile=large-49,725,440-parameters
           runtime_minutes=${RUNTIME_MINUTES}
           stage_steps=${STAGE_STEPS}
           grad_accum=${GRAD_ACCUM}
           targets_per_step=${TARGETS_PER_STEP}
+          eval_samples=${EVAL_SAMPLES}
           curriculum=01-literature,02-code,03-math,04-reasoning,05-balanced
+          goal=validation_loss_below_1.0
           EOF
 
       - name: Upload checkpoint and metrics
