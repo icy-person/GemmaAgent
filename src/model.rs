@@ -68,24 +68,28 @@ impl Model {
         Value::leaf(1, d, values)
     }
 
-    fn attention(&self, block: &Block, states: &[Value], pos: usize) -> Value {
-        let q = block.q.forward(&states[pos]);
-        let keys: Vec<Value> = states[..=pos].iter().map(|x| block.k.forward(x)).collect();
-        let values: Vec<Value> = states[..=pos].iter().map(|x| block.v.forward(x)).collect();
+    fn attention(
+        &self,
+        block: &Block,
+        query: &Value,
+        keys: &[Value],
+        values: &[Value],
+        pos: usize,
+    ) -> Value {
         let head_dim = self.cfg.head_dim();
         let mut heads = Vec::with_capacity(self.cfg.heads);
 
         for head in 0..self.cfg.heads {
             let offset = head * head_dim;
-            let qh = q.slice_cols(offset, head_dim);
-            let mut scores = Vec::with_capacity(keys.len());
-            let mut head_values = Vec::with_capacity(values.len());
-            for (k, v) in keys.iter().zip(&values) {
+            let qh = query.slice_cols(offset, head_dim);
+            let mut scores = Vec::with_capacity(pos + 1);
+            let mut head_values = Vec::with_capacity(pos + 1);
+            for (key, value) in keys[..=pos].iter().zip(&values[..=pos]) {
                 scores.push(
-                    qh.matmul(&k.slice_cols(offset, head_dim).transpose())
+                    qh.matmul(&key.slice_cols(offset, head_dim).transpose())
                         .div_scalar((head_dim as f32).sqrt()),
                 );
-                head_values.push(v.slice_cols(offset, head_dim));
+                head_values.push(value.slice_cols(offset, head_dim));
             }
             let weights = Value::concat_cols(&scores).softmax();
             heads.push(weights.matmul(&Value::concat_rows(&head_values)));
@@ -106,9 +110,17 @@ impl Model {
             .collect();
 
         for block in &self.blocks {
+            // Project Q/K/V once per token. The previous implementation rebuilt
+            // all K/V projections for every query position, multiplying work by
+            // another O(T) factor during every decoder block.
+            let queries: Vec<Value> = states.iter().map(|x| block.q.forward(x)).collect();
+            let keys: Vec<Value> = states.iter().map(|x| block.k.forward(x)).collect();
+            let values: Vec<Value> = states.iter().map(|x| block.v.forward(x)).collect();
+
             let mut next = Vec::with_capacity(states.len());
             for pos in 0..states.len() {
-                let residual = states[pos].add(&self.attention(block, &states, pos));
+                let attention = self.attention(block, &queries[pos], &keys, &values, pos);
+                let residual = states[pos].add(&attention);
                 let hidden = block.up.forward(&residual).silu();
                 next.push(residual.add(&block.down.forward(&hidden)));
             }
@@ -158,5 +170,13 @@ mod tests {
         let hidden = model.forward_hidden(&[256, b'R' as usize, b'u' as usize]);
         assert_eq!(hidden.shape(), (1, cfg.d_model));
         assert_eq!(model.logits(&hidden).shape(), (1, cfg.vocab));
+    }
+
+    #[test]
+    fn forward_is_deterministic_for_fixed_seed() {
+        let cfg = Config::debug();
+        let a = Model::new(cfg, 123).forward_hidden(&[256, 65, 66, 257]);
+        let b = Model::new(cfg, 123).forward_hidden(&[256, 65, 66, 257]);
+        assert_eq!(a.data(), b.data());
     }
 }
