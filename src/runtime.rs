@@ -208,19 +208,36 @@ impl RuntimeModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
     #[test]
     fn cache_tracks_sequence_length() {
-        let model = RuntimeModel::from_parameters(Config::debug(), &{
-            let model = crate::model::Model::new(Config::debug(), 42);
-            model.parameters()
-        });
-        let mut cache = model.new_cache();
-        let hidden = model.prime(&[256, 65, 66], &mut cache);
+        let model = crate::model::Model::new(Config::debug(), 42);
+        let parameters = model.parameters();
+        let runtime = RuntimeModel::from_parameters(Config::debug(), &parameters);
+        let mut cache = runtime.new_cache();
+        let hidden = runtime.prime(&[256, 65, 66], &mut cache);
         assert_eq!(hidden.len(), Config::debug().d_model);
         assert_eq!(cache.len, 3);
-        let _ = model.next(67, &mut cache);
+        let _ = runtime.next(67, &mut cache);
         assert_eq!(cache.len, 4);
+    }
+
+    #[test]
+    fn direct_runtime_matches_reference_forward() {
+        let cfg = Config::debug();
+        let model = crate::model::Model::new(cfg, 123);
+        let parameters = model.parameters();
+        let runtime = RuntimeModel::from_parameters(cfg, &parameters);
+        let tokens = [256, b'R' as usize, b'u' as usize, b's' as usize];
+        let reference = model.forward_hidden(&tokens).data();
+        let mut cache = runtime.new_cache();
+        let actual = runtime.prime(&tokens, &mut cache);
+        assert_eq!(reference.len(), actual.len());
+        let max_error = reference
+            .iter()
+            .zip(actual)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_error < 1e-5, "runtime mismatch: max error {max_error}");
     }
 }
