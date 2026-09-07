@@ -1,23 +1,32 @@
 # GemmaAgent → gemma-rs
 
-این مخزن از پایه به یک پروژهٔ Rust برای ساخت یک مدل زبانی کوچک تبدیل شده است.
+یک پروژهٔ clean-room برای ساخت یک مدل زبانی کوچک با Rust، بدون استفاده از source یا weights مدل‌های Google.
 
-## مدل v0.1
+## مدل فعلی
 
 - Decoder-only Transformer
 - 6 لایه
 - `d_model = 416`
 - 8 attention heads
+- `head_dim = 52`
 - `FFN = 1664`
 - context = 1024 token
 - vocabulary = 16384
-- RoPE positional encoding
+- RoPE
 - RMSNorm
 - SwiGLU-style feed-forward block
 - tied input/output embeddings
-- اجرای اولیه با CPU و بدون وابستگی خارجی
+- CPU و بدون dependency خارجی
 
-وزن‌ها فعلاً به‌صورت deterministic و تصادفی مقداردهی می‌شوند؛ این نسخه هنوز مدل آموزش‌دیده نیست. هدف این commit ساخت هستهٔ درست معماری است تا مرحلهٔ بعدی، یعنی tokenizer واقعی، loss و backpropagation در Rust روی آن اضافه شود.
+## هستهٔ آموزش
+
+- Tensor/Matrix primitives
+- Cross-entropy + logits gradient
+- AdamW
+- Autograd گرافی با backward برای `add` و `matmul`
+- تست گرادیان برای matmul
+
+وزن‌های Transformer هنوز تصادفی هستند و مدل آموزش‌دیده نیست. مرحلهٔ بعدی، اتصال autograd به تمام عملیات Transformer و ساخت data loader و training loop واقعی است.
 
 ## اجرا
 
@@ -25,21 +34,22 @@
 cargo run --release
 ```
 
-برای بررسی:
+بررسی کد:
 
 ```bash
 cargo fmt --check
 cargo check
+cargo test
 ```
 
 ## نقشهٔ راه
 
-1. Tensor/autograd کامل
-2. cross-entropy loss
-3. AdamW
-4. tokenizer با BPE/SentencePiece-compatible vocabulary
-5. data loader و training loop
+1. اتصال autograd به Transformer
+2. cross-entropy روی sequence logits
+3. AdamW روی تمام پارامترهای مدل
+4. tokenizer واقعی BPE/SentencePiece-compatible
+5. dataset و streaming data loader
 6. checkpoint format
-7. mixed precision / memory optimizations
-8. inference با KV cache
-9. backend های SIMD و Vulkan
+7. gradient accumulation و mixed precision
+8. KV cache برای inference
+9. SIMD و Vulkan backend
