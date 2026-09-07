@@ -240,4 +240,27 @@ mod tests {
             .fold(0.0f32, f32::max);
         assert!(max_error < 1e-5, "runtime mismatch: max error {max_error}");
     }
+
+    #[test]
+    fn incremental_runtime_matches_full_forward() {
+        let cfg = Config::debug();
+        let model = crate::model::Model::new(cfg, 321);
+        let parameters = model.parameters();
+        let runtime = RuntimeModel::from_parameters(cfg, &parameters);
+        let prompt = [256, 65, 66, 67];
+        let next_token = 68;
+        let reference = model.forward_hidden(&[256, 65, 66, 67, 68]).data();
+        let mut cache = runtime.new_cache();
+        let _ = runtime.prime(&prompt, &mut cache);
+        let actual = runtime.next(next_token, &mut cache);
+        let max_error = reference
+            .iter()
+            .zip(actual)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_error < 1e-5,
+            "incremental KV-cache mismatch: max error {max_error}"
+        );
+    }
 }
