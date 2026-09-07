@@ -16,9 +16,10 @@
 - AdamW با weight decay و bias correction
 - حلقهٔ آموزش واقعی CPU
 - checkpoint باینری shape-safe
-- autoregressive greedy inference با سقف token قابل تنظیم
+- autoregressive inference با greedy و sampling
+- sampling با `temperature` و `top-k` بدون dependency جدید
 - initialization قطعی برای بازتولیدپذیری
-- تست‌های regression برای autograd، مدل، optimizer، tokenizer و checkpoint
+- تست‌های regression برای autograd، مدل، optimizer، tokenizer، sampling و checkpoint
 
 ## پروفایل‌ها
 
@@ -36,12 +37,21 @@
 
 که برای پروفایل هدف دقیقاً `19,275,776` پارامتر است. در FP32 فقط وزن‌ها حدود `73.53 MiB` فضا می‌گیرند؛ activationها، گرادیان‌ها و state مربوط به AdamW جدا هستند.
 
+نکته: tokenizer فعلی بایتی است و فقط 258 شناسهٔ واقعی تولید می‌کند؛ vocab بزرگ‌تر در پروفایل هدف عمداً برای آزمایش معماری و پارامترشمارش نگه داشته شده است.
+
 ## اجرا
 
 تست‌ها:
 
 ```bash
 cargo test
+```
+
+lint و regression CI:
+
+```bash
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
 ```
 
 آموزش سریع برای صحت‌سنجی کل pipeline:
@@ -58,19 +68,28 @@ cargo run --release -- train 300 gemma-agent-target.ckpt --target
 
 > هشدار: kernelهای فعلی عمداً scalar و CPU-only هستند. بنابراین پروفایل ۱۹ میلیون پارامتری از نظر زمانی آموزشی و برای توسعهٔ سریع مناسب نیست. هدف این نسخه، تثبیت correctness و architecture است.
 
-Inference:
+Inference greedy:
 
 ```bash
 cargo run --release -- infer gemma-agent.ckpt "Rust is"
-cargo run --release -- infer gemma-agent.ckpt "Rust is" --tokens 128
+```
+
+Sampling:
+
+```bash
+cargo run --release -- infer gemma-agent.ckpt "Rust is" --temperature 0.8 --top-k 40 --tokens 128
 ```
 
 برای پروفایل هدف باید همان فلگ `--target` را در inference هم بدهید:
 
 ```bash
-cargo run --release -- infer gemma-agent-target.ckpt "Rust is" --target --tokens 128
+cargo run --release -- infer gemma-agent-target.ckpt "Rust is" --target --temperature 0.8 --top-k 40 --tokens 128
 ```
+
+`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است.
 
 ## وضعیت مهندسی
 
-این repository اکنون یک هستهٔ مستقل و قابل تست دارد، اما هنوز یک runtime سریع تولیدی نیست. مرحلهٔ بعدی منطقی عبارت است از tensorهای contiguous و kernelهای SIMD، threading، memory planning، mixed precision، KV cache، sampling و سپس backendهای Vulkan/CUDA/ROCm.
+این repository اکنون یک هستهٔ مستقل و قابل تست دارد، اما هنوز یک runtime سریع تولیدی نیست. مرحلهٔ بعدی منطقی عبارت است از tensorهای contiguous و kernelهای SIMD، threading، memory planning، mixed precision، KV cache، batching و سپس backendهای Vulkan/CUDA/ROCm.
+
+CI فعلی compilation/lint و regression tests را روی Rust stable اجرا می‌کند.
