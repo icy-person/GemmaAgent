@@ -1,0 +1,89 @@
+GemmaAgent is a small language model written in Rust.
+
+Rust is a systems programming language focused on safety, speed, and reliability.
+Rust provides ownership, borrowing, lifetimes, traits, enums, pattern matching, and zero-cost abstractions.
+
+A language model learns patterns from text.
+During training, the model receives a sequence of tokens and tries to predict the next token.
+The difference between the predicted token and the correct token is measured by cross entropy loss.
+Gradients are computed with automatic differentiation.
+AdamW updates the model parameters using the computed gradients.
+
+GemmaAgent uses a transformer architecture.
+The transformer contains token embeddings, causal self-attention, feed-forward layers, and an output projection.
+Causal attention prevents a token from attending to future tokens.
+Multi-head attention allows the model to learn different relationships between tokens.
+
+During inference, GemmaAgent can generate text one token at a time.
+KV cache stores previously computed keys and values so that they do not need to be recomputed for every generated token.
+This makes incremental decoding faster than repeatedly evaluating the entire sequence.
+
+Greedy decoding selects the most probable next token.
+Temperature changes the sharpness of the probability distribution.
+Top-k sampling restricts sampling to the k most probable tokens.
+
+Example Rust code:
+
+fn main() {
+    println!("Hello from GemmaAgent!");
+}
+
+Rust programs are compiled before execution.
+Cargo is the Rust package manager and build system.
+A Rust project normally contains a Cargo.toml file and a src directory.
+
+Machine learning experiments should be reproducible.
+Training checkpoints should be saved periodically.
+A checkpoint allows training to continue after an interruption or system failure.
+
+GemmaAgent is designed as an educational language model.
+The current tokenizer is byte-level.
+Future versions can use BPE or another subword tokenizer with a larger vocabulary.
+Future improvements can also include RMSNorm, RoPE, SIMD optimizations, contiguous tensor backends, and GPU acceleration.
+
+The goal is to build a small language model from first principles in Rust.
+The project includes training, inference, checkpointing, benchmarking, testing, and continuous integration.
+
+Rust makes it possible to build fast and memory-efficient machine learning software.
+A carefully designed runtime can execute transformer inference directly on the CPU.
+Efficient memory access and cache-friendly tensor operations are important for good inference performance.
+
+The model should learn simple facts about programming, machine learning, transformers, Rust, and GemmaAgent.
+Training data should contain many natural examples rather than a single repeated sentence.
+
+Rust ownership example:
+
+struct User {
+    name: String,
+    age: u32,
+}
+
+fn greet(user: &User) {
+    println!("Hello, {}!", user.name);
+}
+
+fn main() {
+    let user = User {
+        name: String::from("Alice"),
+        age: 20,
+    };
+
+    greet(&user);
+}
+
+Attention example:
+
+Given a sequence of tokens, the model creates queries, keys, and values.
+Attention scores are computed from queries and keys.
+A causal mask prevents access to future positions.
+The scores are normalized with softmax.
+The resulting weights are multiplied by the values.
+
+A transformer language model predicts:
+"The Rust language is"
+and may continue with:
+"fast, safe, and expressive."
+
+Good training data should include different sentence lengths, punctuation, code, explanations, and repeated concepts expressed in different ways.
+
+GemmaAgent training is an experiment in understanding how modern language models work.

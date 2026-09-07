@@ -1,14 +1,14 @@
 #![cfg(feature = "cuda")]
 
-use candle_core::{DType, D, Device, Result, Tensor};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::embedding::Embedding;
 use candle_nn::layer_norm::RmsNorm;
-use candle_nn::linear::{linear_no_bias, Linear};
+use candle_nn::linear::{Linear, linear_no_bias};
 use candle_nn::loss::cross_entropy;
 use candle_nn::ops::{silu, softmax};
 use candle_nn::optim::{AdamW, Optimizer, ParamsAdamW};
 use candle_nn::rotary_emb::rope_slow;
-use candle_nn::{embedding, rms_norm as make_rms_norm, Module, VarBuilder, VarMap};
+use candle_nn::{Module, VarBuilder, VarMap, embedding, rms_norm as make_rms_norm};
 use std::path::Path;
 use std::time::Instant;
 
@@ -42,7 +42,11 @@ struct GpuModel {
 impl GpuModel {
     fn new(cfg: Config, vb: VarBuilder, device: &Device) -> Result<Self> {
         cfg.validate();
-        assert_eq!(cfg.head_dim() % 2, 0, "head dimension must be even for RoPE");
+        assert_eq!(
+            cfg.head_dim() % 2,
+            0,
+            "head dimension must be even for RoPE"
+        );
 
         let emb = embedding(cfg.vocab, cfg.d_model, vb.pp("tok_embeddings"))?;
         let mut blocks = Vec::with_capacity(cfg.layers);
@@ -98,15 +102,21 @@ impl GpuModel {
 
         for block in &self.blocks {
             let n = block.ln1.forward(&x)?;
-            let q = block.q.forward(&n)?
+            let q = block
+                .q
+                .forward(&n)?
                 .reshape((batch, seq, self.cfg.heads, self.cfg.head_dim()))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            let k = block.k.forward(&n)?
+            let k = block
+                .k
+                .forward(&n)?
                 .reshape((batch, seq, self.cfg.heads, self.cfg.head_dim()))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            let v = block.v.forward(&n)?
+            let v = block
+                .v
+                .forward(&n)?
                 .reshape((batch, seq, self.cfg.heads, self.cfg.head_dim()))?
                 .transpose(1, 2)?
                 .contiguous()?;
@@ -120,9 +130,11 @@ impl GpuModel {
             let mask = mask.broadcast_as((batch, self.cfg.heads, seq, seq))?;
             scores = (scores + mask)?;
             let weights = softmax(&scores, D::Minus1)?;
-            let attn = weights.broadcast_matmul(&v)?
-                .transpose(1, 2)?
-                .reshape((batch, seq, self.cfg.d_model))?;
+            let attn = weights.broadcast_matmul(&v)?.transpose(1, 2)?.reshape((
+                batch,
+                seq,
+                self.cfg.d_model,
+            ))?;
             x = (x + block.o.forward(&attn)?)?;
 
             let n2 = block.ln2.forward(&x)?;
@@ -173,7 +185,11 @@ fn make_batch(
     for b in 0..batch_size {
         let start = (step * batch_size + b) % window_count;
         x.extend(encoded[start..start + context].iter().map(|&v| v as u32));
-        y.extend(encoded[start + 1..start + context + 1].iter().map(|&v| v as u32));
+        y.extend(
+            encoded[start + 1..start + context + 1]
+                .iter()
+                .map(|&v| v as u32),
+        );
     }
     let xs = Tensor::from_vec(x, (batch_size, context), device)?;
     let ys = Tensor::from_vec(y, (batch_size, context), device)?;
@@ -218,7 +234,11 @@ pub fn train(
     println!(
         "GemmaAgent GPU: {} params + RMSNorm gains | context {} | heads {} | batch {} | grad-accum {} | lr {:.6}",
         cfg.params() + cfg.d_model * (2 * cfg.layers + 1),
-        cfg.context, cfg.heads, batch_size, grad_accum, lr
+        cfg.context,
+        cfg.heads,
+        batch_size,
+        grad_accum,
+        lr
     );
     println!("training corpus: {} bytes from {data_path}", corpus.len());
 
@@ -309,7 +329,10 @@ pub fn benchmark(
     let secs = start.elapsed().as_secs_f64();
     let tok_per_sec = (batch_size * context * iters) as f64 / secs.max(f64::MIN_POSITIVE);
     println!("GPU benchmark: CUDA device {gpu_index}");
-    println!("{} params | batch {batch_size} | context {context} | iterations {iters}", cfg.params());
+    println!(
+        "{} params | batch {batch_size} | context {context} | iterations {iters}",
+        cfg.params()
+    );
     println!("forward throughput: {:.0} tok/s", tok_per_sec);
     Ok(())
 }

@@ -32,7 +32,11 @@ impl Config {
     }
 
     pub fn head_dim(&self) -> usize {
-        assert_eq!(self.d_model % self.heads, 0, "d_model must divide evenly across heads");
+        assert_eq!(
+            self.d_model % self.heads,
+            0,
+            "d_model must divide evenly across heads"
+        );
         self.d_model / self.heads
     }
 
@@ -45,7 +49,11 @@ impl Config {
         assert!(self.vocab >= 2, "vocab must contain at least BOS and EOS");
         assert!(self.context > 0, "context must be non-zero");
         assert!(self.d_model > 0 && self.layers > 0 && self.heads > 0 && self.ffn > 0);
-        assert_eq!(self.d_model % self.heads, 0, "d_model must divide evenly across heads");
+        assert_eq!(
+            self.d_model % self.heads,
+            0,
+            "d_model must divide evenly across heads"
+        );
     }
 
     pub fn approx_parameter_memory_mb(&self) -> f32 {
@@ -61,7 +69,10 @@ mod tests {
     fn target_profile_matches_documented_shape() {
         let c = Config::target();
         c.validate();
-        assert_eq!((c.context, c.heads, c.d_model, c.layers, c.ffn), (1024, 8, 416, 6, 1664));
+        assert_eq!(
+            (c.context, c.heads, c.d_model, c.layers, c.ffn),
+            (1024, 8, 416, 6, 1664)
+        );
         assert_eq!(c.params(), 19_275_776);
         assert!((c.approx_parameter_memory_mb() - 73.530).abs() < 0.01);
     }

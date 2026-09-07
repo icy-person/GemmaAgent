@@ -13,7 +13,10 @@ pub struct AmdTokenizer {
 
 impl AmdTokenizer {
     pub fn train(text: &str, vocab_size: usize) -> Self {
-        assert!(vocab_size >= 258, "vocab must leave room for byte + special tokens");
+        assert!(
+            vocab_size >= 258,
+            "vocab must leave room for byte + special tokens"
+        );
 
         let mut counts: HashMap<Vec<u8>, u32> = HashMap::new();
         for word in text.split_whitespace() {
@@ -151,33 +154,48 @@ impl AmdTokenizer {
         let text = fs::read_to_string(path)?;
         let mut lines = text.lines();
         if lines.next() != Some("AMDTOK1") {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid AMD tokenizer header"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid AMD tokenizer header",
+            ));
         }
         let vocab_size: usize = lines
             .next()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing vocab size"))?
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing vocab size")
+            })?
             .parse()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid vocab size"))?;
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid vocab size")
+            })?;
         if vocab_size < 258 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "AMD tokenizer vocab is too small"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "AMD tokenizer vocab is too small",
+            ));
         }
         let mut pieces = vec![Vec::<u8>::new(); vocab_size];
         for line in lines.filter(|line| !line.trim().is_empty()) {
-            let (id_text, hex) = line
-                .split_once(' ')
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed tokenizer entry"))?;
-            let id: usize = id_text
-                .parse()
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid token id"))?;
+            let (id_text, hex) = line.split_once(' ').ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed tokenizer entry")
+            })?;
+            let id: usize = id_text.parse().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid token id")
+            })?;
             if id < FIRST_LEARNED_ID || id >= vocab_size.saturating_sub(2) || hex.len() % 2 != 0 {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "token id out of range"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "token id out of range",
+                ));
             }
             let mut bytes = Vec::with_capacity(hex.len() / 2);
             for chunk in hex.as_bytes().chunks_exact(2) {
-                let s = std::str::from_utf8(chunk)
-                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid token bytes"))?;
-                let byte = u8::from_str_radix(s, 16)
-                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid token hex"))?;
+                let s = std::str::from_utf8(chunk).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid token bytes")
+                })?;
+                let byte = u8::from_str_radix(s, 16).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid token hex")
+                })?;
                 bytes.push(byte);
             }
             pieces[id] = bytes;
@@ -191,7 +209,12 @@ impl AmdTokenizer {
             by_first[pieces[id][0] as usize].push(id);
         }
         for ids in &mut by_first {
-            ids.sort_unstable_by(|&a, &b| pieces[b].len().cmp(&pieces[a].len()).then_with(|| a.cmp(&b)));
+            ids.sort_unstable_by(|&a, &b| {
+                pieces[b]
+                    .len()
+                    .cmp(&pieces[a].len())
+                    .then_with(|| a.cmp(&b))
+            });
         }
 
         Ok(Self {

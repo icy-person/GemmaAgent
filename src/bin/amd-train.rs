@@ -1,17 +1,17 @@
 #![recursion_limit = "256"]
 
 #[cfg(feature = "amd-vulkan")]
+#[path = "../amd.rs"]
+mod amd;
+#[cfg(feature = "amd-vulkan")]
+#[path = "../amd_tokenizer.rs"]
+mod amd_tokenizer;
+#[cfg(feature = "amd-vulkan")]
 #[path = "../config.rs"]
 mod config;
 #[cfg(feature = "amd-vulkan")]
 #[path = "../tokenizer.rs"]
 mod tokenizer;
-#[cfg(feature = "amd-vulkan")]
-#[path = "../amd_tokenizer.rs"]
-mod amd_tokenizer;
-#[cfg(feature = "amd-vulkan")]
-#[path = "../amd.rs"]
-mod amd;
 
 #[cfg(feature = "amd-vulkan")]
 fn parse_usize(args: &[String], name: &str, default: usize) -> usize {
@@ -44,7 +44,9 @@ fn parse_string(args: &[String], name: &str, default: &str) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("GemmaAgent AMD Vulkan trainer\n\nUsage:\n  cargo run --release --features amd-vulkan --bin amd-train -- --target --steps 5000 --data ./train.txt --checkpoint gemma-agent-amd.bin\n\nOptions:\n  --target               use the 19M-parameter configuration\n  --steps N              optimizer updates (default 5000)\n  --data FILE            UTF-8 training corpus (default ./train.txt)\n  --checkpoint FILE      latest Burn binary model checkpoint\n  --best-checkpoint FILE best-validation checkpoint (default <checkpoint>.best)\n  --tokenizer FILE       target tokenizer (default <checkpoint>.tok)\n  --resume FILE          resume weights from an existing Burn checkpoint\n  --batch-size N         windows per GPU batch (default 2)\n  --grad-accum N         micro-batches per optimizer update (default 1)\n  --lr X                 base AdamW learning rate (default 0.0003)\n  --checkpoint-every N   save every N updates (default 250)\n  --eval-every N         validation interval (default 250)\n  --gpu-kind K           integrated, discrete, or best (default integrated)\n  --gpu N                GPU ordinal (default 0)\n");
+        println!(
+            "GemmaAgent AMD Vulkan trainer\n\nUsage:\n  cargo run --release --features amd-vulkan --bin amd-train -- --target --steps 5000 --data ./train.txt --checkpoint gemma-agent-amd.bin\n\nOptions:\n  --target               use the 19M-parameter configuration\n  --steps N              optimizer updates (default 5000)\n  --data FILE            UTF-8 training corpus (default ./train.txt)\n  --checkpoint FILE      latest Burn binary model checkpoint\n  --best-checkpoint FILE best-validation checkpoint (default <checkpoint>.best)\n  --tokenizer FILE       target tokenizer (default <checkpoint>.tok)\n  --resume FILE          resume weights from an existing Burn checkpoint\n  --batch-size N         windows per GPU batch (default 2)\n  --grad-accum N         micro-batches per optimizer update (default 1)\n  --lr X                 base AdamW learning rate (default 0.0003)\n  --checkpoint-every N   save every N updates (default 250)\n  --eval-every N         validation interval (default 250)\n  --gpu-kind K           integrated, discrete, or best (default integrated)\n  --gpu N                GPU ordinal (default 0)\n"
+        );
         return;
     }
 

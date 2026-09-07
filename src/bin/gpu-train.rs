@@ -2,11 +2,11 @@
 #[path = "../config.rs"]
 mod config;
 #[cfg(feature = "cuda")]
-#[path = "../tokenizer.rs"]
-mod tokenizer;
-#[cfg(feature = "cuda")]
 #[path = "../gpu.rs"]
 mod gpu;
+#[cfg(feature = "cuda")]
+#[path = "../tokenizer.rs"]
+mod tokenizer;
 
 #[cfg(feature = "cuda")]
 use std::process::ExitCode;
@@ -81,7 +81,9 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("GPU training failed: {err}");
-            eprintln!("Check that the NVIDIA driver and CUDA toolkit are installed and that the requested GPU ordinal exists.");
+            eprintln!(
+                "Check that the NVIDIA driver and CUDA toolkit are installed and that the requested GPU ordinal exists."
+            );
             ExitCode::from(1)
         }
     }
