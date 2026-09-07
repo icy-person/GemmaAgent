@@ -12,9 +12,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      # Keep CUDA out of the generic runner: candle/cudarc requires nvcc,
-      # which is not installed on ubuntu-latest. CPU checks remain feature-free.
+      # Keep CUDA out of the generic runner: candle/cudarc requires nvcc.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
+      - run: cargo build --release --bin cpu-train
       # Compile-check the full AMD/Vulkan path separately.
       - run: cargo check --all-targets --features amd-vulkan
