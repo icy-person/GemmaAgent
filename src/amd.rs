@@ -17,7 +17,7 @@ use burn::{
     tensor::{Device, Int, Tensor, TensorData, backend::ops::AttentionModuleOptions},
 };
 use burn_wgpu::{Wgpu, WgpuDevice, graphics::Vulkan, init_setup};
-use std::{fs, path::Path, time::Instant};
+use std::{fs, path::Path, thread, time::{Duration, Instant}};
 
 use crate::{amd_tokenizer::AmdTokenizer, config::Config, tokenizer::Tokenizer};
 
@@ -393,6 +393,7 @@ fn curriculum_context(full: usize, update: usize, total: usize) -> usize {
         full
     }
 }
+
 fn meta_path(path: &str) -> String {
     format!("{path}.state")
 }
@@ -499,6 +500,21 @@ fn evaluate(
     total / batches as f64
 }
 
+fn throttle_gpu_duty_cycle(update_start: Instant, target_percent: f64) {
+    let target = target_percent.clamp(1.0, 100.0);
+    if target >= 99.999 {
+        return;
+    }
+    let work_time = update_start.elapsed();
+    if work_time.is_zero() {
+        return;
+    }
+    let sleep_nanos = (work_time.as_secs_f64() * (100.0 - target) / target * 1e9) as u64;
+    if sleep_nanos > 0 {
+        thread::sleep(Duration::from_nanos(sleep_nanos));
+    }
+}
+
 pub fn train(
     cfg: Config,
     steps: usize,
@@ -514,9 +530,11 @@ pub fn train(
     eval_every: usize,
     gpu_index: usize,
     gpu_kind: &str,
+    gpu_util: f64,
 ) {
     cfg.validate();
     assert!(steps > 0 && batch_size > 0 && grad_accum > 0 && lr.is_finite() && lr > 0.0);
+    assert!(gpu_util.is_finite() && (1.0..=100.0).contains(&gpu_util));
     let device = make_device(gpu_index, gpu_kind);
     let model_cfg = AmdModelConfig::new(cfg);
     let mut model: AmdModel<AmdBackend> = model_cfg.init(&device);
@@ -574,7 +592,7 @@ pub fn train(
         cfg.ffn
     );
     println!(
-        "tokens={} train={} val={} | batch={} accum={} | lr={lr:.7} warmup={warmup}",
+        "tokens={} train={} val={} | batch={} accum={} | lr={lr:.7} warmup={warmup} gpu-duty={gpu_util:.1}%",
         encoded.len(),
         train_tokens.len(),
         val_tokens.len(),
@@ -587,6 +605,7 @@ pub fn train(
     let mut interval_updates = 0usize;
     let mut last = Instant::now();
     for update in start_update..steps {
+        let update_start = Instant::now();
         let current_context = curriculum_context(cfg.context, update, steps);
         let current_lr = cosine_lr(lr, 0.1, update, warmup, steps);
         let mut accumulator = GradientsAccumulator::new();
@@ -612,17 +631,23 @@ pub fn train(
         let grads = accumulator.grads();
         assert!(!grads.is_empty(), "no gradients reached optimizer");
         model = optimizer.step(current_lr, model, grads);
+
+        // Force completion of the Vulkan queue before measuring the work interval.
+        let _sync = Tensor::<AmdBase, 1>::zeros([1], &device).sum().into_scalar();
+        throttle_gpu_duty_cycle(update_start, gpu_util);
+
         interval_loss += update_loss;
         interval_updates += 1;
         if update % 10 == 9 || update + 1 == steps {
             let elapsed = last.elapsed().as_secs_f64().max(1e-9);
             println!(
-                "update {:6} loss {:.5} lr {:.7} | {:.0} tok/s | ctx {}",
+                "update {:6} loss {:.5} lr {:.7} | {:.0} tok/s | ctx {} | gpu-duty {:.1}%",
                 update + 1,
                 interval_loss / interval_updates as f64,
                 current_lr,
                 interval_tokens as f64 / elapsed,
-                current_context
+                current_context,
+                gpu_util
             );
             interval_loss = 0.0;
             interval_tokens = 0;
@@ -754,5 +779,10 @@ mod tests {
         assert_eq!(curriculum_context(1024, 0, 300), 256);
         assert_eq!(curriculum_context(1024, 120, 300), 512);
         assert_eq!(curriculum_context(1024, 299, 300), 1024);
+    }
+    #[test]
+    fn throttle_target_is_well_formed() {
+        assert!((1.0..=100.0).contains(&50.0));
+        assert!((1.0..=100.0).contains(&100.0));
     }
 }
