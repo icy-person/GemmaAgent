@@ -1,11 +1,13 @@
 # Backend architecture
 
-Each runtime backend has its own directory:
+Each runtime backend has its own directory and owns its implementation and entrypoints:
 
-- `backend/cpu` — scalar CPU + autograd training
-- `backend/amd` — desktop Vulkan training/benchmark/inference
-- `backend/android` — Android arm64 Vulkan inference
+- `backend/cpu` — scalar CPU + custom reverse-mode autograd training
+- `backend/amd` — desktop Radeon/AMD Vulkan training, benchmark and KV-cache inference
+- `backend/android` — Android arm64 Vulkan inference using the shared Vulkan engine adapter
 
-Shared backend-neutral code belongs in `src/core`.
+Backend-neutral code belongs only in `src/core`.
 
-The public binaries under `src/bin` are thin compatibility launchers only.
+Cargo binaries are declared explicitly from `backend/*/bin` with `autobins=false`; there are no legacy binaries under `src/bin`.
+
+Exactly one runtime feature is required per build: `runner-cpu`, `amd-vulkan`, or `android-vulkan`.
