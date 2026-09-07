@@ -15,29 +15,75 @@ use std::time::Instant;
 use tokenizer::Tokenizer;
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(index, _)| index).unwrap_or(0)
+    values
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
 }
 
-fn cross_entropy(model: &Model, input: &[usize], target: usize) -> Value {
-    let hidden = model.forward_hidden(input);
-    let probabilities = model.logits(&hidden).softmax();
+fn cross_entropy_from_hidden(model: &Model, hidden: &Value, target: usize) -> Value {
+    let probabilities = model.logits(hidden).softmax();
     probabilities.gather(target).log().neg()
 }
 
+fn cross_entropy(model: &Model, input: &[usize], target: usize, targets_per_step: usize) -> Value {
+    assert!(input.len() >= 2, "training windows need at least two tokens");
+    assert!(targets_per_step > 0, "targets per step must be at least 1");
+
+    let hidden = model.forward_all_hidden(input);
+    let usable = input.len() - 1;
+    let count = targets_per_step.min(usable);
+
+    let mut total = cross_entropy_from_hidden(model, &hidden[0], input[1]);
+    let mut selected = 1usize;
+    for i in 1..count {
+        let pos = i * usable / count;
+        total = total.add(&cross_entropy_from_hidden(model, &hidden[pos], input[pos + 1]));
+        selected += 1;
+    }
+
+    // Keep the original next-token objective as well: the token immediately
+    // after the context is still an important prediction target.
+    total = total.add(&cross_entropy_from_hidden(
+        model,
+        hidden.last().expect("non-empty hidden sequence"),
+        target,
+    ));
+    selected += 1;
+    total.div_scalar(selected as f32)
+}
+
 fn config_from_args(args: &[String]) -> Config {
-    if args.iter().any(|arg| arg == "--target") { Config::target() } else { Config::debug() }
+    if args.iter().any(|arg| arg == "--target") {
+        Config::target()
+    } else {
+        Config::debug()
+    }
 }
 
 fn parse_float_arg(args: &[String], name: &str, default: f32) -> f32 {
-    args.iter().position(|arg| arg == name).and_then(|i| args.get(i + 1)).and_then(|x| x.parse().ok()).unwrap_or(default)
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|i| args.get(i + 1))
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(default)
 }
 
 fn parse_usize_arg(args: &[String], name: &str, default: usize) -> usize {
-    args.iter().position(|arg| arg == name).and_then(|i| args.get(i + 1)).and_then(|x| x.parse().ok()).unwrap_or(default)
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|i| args.get(i + 1))
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(default)
 }
 
 fn parse_string_arg<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
-    args.iter().position(|arg| arg == name).and_then(|i| args.get(i + 1)).map(String::as_str)
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 fn train(
@@ -47,42 +93,71 @@ fn train(
     checkpoint_every: usize,
     grad_accum: usize,
     data_path: Option<&str>,
+    targets_per_step: usize,
 ) {
     cfg.validate();
     assert!(grad_accum > 0, "gradient accumulation must be at least 1");
+    assert!(targets_per_step > 0, "targets per step must be at least 1");
     let tokenizer = Tokenizer::new();
     let corpus = match data_path {
-        Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read training data '{path}': {e}")),
+        Some(path) => std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read training data '{path}': {e}")),
         None => tokenizer::tiny_corpus(),
     };
     assert!(!corpus.is_empty(), "training corpus must not be empty");
     let encoded = tokenizer.encode(&corpus);
-    assert!(encoded.len() > cfg.context + 1, "training corpus is shorter than the configured context");
+    assert!(
+        encoded.len() > cfg.context + 1,
+        "training corpus is shorter than the configured context"
+    );
 
     println!(
         "GemmaAgent: {} params | context {} | {} heads | {:.2} MiB fp32",
-        cfg.params(), cfg.context, cfg.heads, cfg.approx_parameter_memory_mb()
+        cfg.params(),
+        cfg.context,
+        cfg.heads,
+        cfg.approx_parameter_memory_mb()
     );
-    println!("training corpus: {} bytes{}", corpus.len(), data_path.map(|p| format!(" from {p}")).unwrap_or_default());
-    if cfg == Config::target() { println!("target profile selected; scalar CPU training is intentionally slow"); }
+    println!(
+        "training corpus: {} bytes{}",
+        corpus.len(),
+        data_path
+            .map(|p| format!(" from {p}"))
+            .unwrap_or_default()
+    );
+    if cfg == Config::target() {
+        println!("target profile selected; scalar CPU training is intentionally slow");
+    }
     println!("gradient accumulation: {grad_accum}");
-    if checkpoint_every > 0 { println!("periodic checkpoints: every {checkpoint_every} steps -> {path}"); }
+    println!("targets per window: {} + 1 next-context target", targets_per_step.min(cfg.context));
+    if checkpoint_every > 0 {
+        println!("periodic checkpoints: every {checkpoint_every} steps -> {path}");
+    }
 
     let model = Model::new(cfg, 42);
     let parameters = model.parameters();
-    let mut optimizer = AdamW::new(if cfg == Config::target() { 0.0005 } else { 0.002 });
+    let mut optimizer = AdamW::new(if cfg == Config::target() { 0.0005 } else { 0.0005 });
 
     let window_count = encoded.len() - cfg.context;
     let mut accumulated = 0usize;
     let mut loss_sum = 0.0f32;
     for step in 1..=steps {
         let start = (step - 1) % window_count;
-        let loss = cross_entropy(&model, &encoded[start..start + cfg.context], encoded[start + cfg.context]);
+        let loss = cross_entropy(
+            &model,
+            &encoded[start..start + cfg.context],
+            encoded[start + cfg.context],
+            targets_per_step,
+        );
         let value = loss.data()[0];
         loss_sum += value;
         accumulated += 1;
 
-        let divisor = if step == steps { accumulated } else { grad_accum };
+        let divisor = if step == steps {
+            accumulated
+        } else {
+            grad_accum
+        };
         loss.div_scalar(divisor as f32).backward();
 
         if accumulated == grad_accum || step == steps {
@@ -119,13 +194,20 @@ fn uniform01(state: &mut u64) -> f32 {
 
 fn sample_token(logits: &[f32], temperature: f32, top_k: usize, rng_state: &mut u64) -> usize {
     assert!(temperature.is_finite() && temperature > 0.0);
-    if temperature <= 1e-6 { return argmax(logits); }
+    if temperature <= 1e-6 {
+        return argmax(logits);
+    }
 
     let mut indices: Vec<usize> = (0..logits.len()).collect();
     indices.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]));
-    if top_k > 0 && top_k < indices.len() { indices.truncate(top_k); }
+    if top_k > 0 && top_k < indices.len() {
+        indices.truncate(top_k);
+    }
 
-    let max_logit = indices.iter().map(|&i| logits[i] / temperature).fold(f32::NEG_INFINITY, f32::max);
+    let max_logit = indices
+        .iter()
+        .map(|&i| logits[i] / temperature)
+        .fold(f32::NEG_INFINITY, f32::max);
     let mut weights = Vec::with_capacity(indices.len());
     let mut total = 0.0f32;
     for &index in &indices {
@@ -133,18 +215,29 @@ fn sample_token(logits: &[f32], temperature: f32, top_k: usize, rng_state: &mut 
         weights.push(weight);
         total += weight;
     }
-    if !total.is_finite() || total <= 0.0 { return indices[0]; }
+    if !total.is_finite() || total <= 0.0 {
+        return indices[0];
+    }
 
     let threshold = uniform01(rng_state) * total;
     let mut cumulative = 0.0;
     for (index, weight) in indices.iter().zip(weights) {
         cumulative += weight;
-        if cumulative >= threshold { return *index; }
+        if cumulative >= threshold {
+            return *index;
+        }
     }
     *indices.last().unwrap()
 }
 
-fn infer(path: &str, prompt: &str, cfg: Config, max_new_tokens: usize, temperature: f32, top_k: usize) {
+fn infer(
+    path: &str,
+    prompt: &str,
+    cfg: Config,
+    max_new_tokens: usize,
+    temperature: f32,
+    top_k: usize,
+) {
     cfg.validate();
     let tokenizer = Tokenizer::new();
     let autograd_model = Model::new(cfg, 42);
@@ -167,9 +260,15 @@ fn infer(path: &str, prompt: &str, cfg: Config, max_new_tokens: usize, temperatu
     let mut logits = runtime.logits(&runtime.prime(&tokens, &mut cache));
     let mut rng_state = 0x9E37_79B9_7F4A_7C15u64;
     for _ in 0..max_new_tokens {
-        let next = if temperature <= 1e-6 { argmax(&logits) } else { sample_token(&logits, temperature, top_k, &mut rng_state) };
+        let next = if temperature <= 1e-6 {
+            argmax(&logits)
+        } else {
+            sample_token(&logits, temperature, top_k, &mut rng_state)
+        };
         tokens.push(next);
-        if next == tokenizer::EOS || tokens.len() >= cfg.context { break; }
+        if next == tokenizer::EOS || tokens.len() >= cfg.context {
+            break;
+        }
         logits = runtime.logits(&runtime.next(next, &mut cache));
     }
     println!("{}", tokenizer.decode(&tokens));
@@ -195,22 +294,36 @@ fn bench(cfg: Config, prompt_tokens: usize, generated_tokens: usize) {
     }
     let decode_seconds = decode_start.elapsed().as_secs_f64();
 
-    println!("benchmark: {} params | prompt {} | generated {}", cfg.params(), prompt_tokens, generated_tokens);
-    println!("prefill: {:.3}s | {:.2} tok/s", prefill_seconds, prompt_tokens as f64 / prefill_seconds.max(f64::MIN_POSITIVE));
-    println!("decode:  {:.3}s | {:.2} tok/s", decode_seconds, generated_tokens as f64 / decode_seconds.max(f64::MIN_POSITIVE));
+    println!(
+        "benchmark: {} params | prompt {} | generated {}",
+        cfg.params(),
+        prompt_tokens,
+        generated_tokens
+    );
+    println!(
+        "prefill: {:.3}s | {:.2} tok/s",
+        prefill_seconds,
+        prompt_tokens as f64 / prefill_seconds.max(f64::MIN_POSITIVE)
+    );
+    println!(
+        "decode:  {:.3}s | {:.2} tok/s",
+        decode_seconds,
+        generated_tokens as f64 / decode_seconds.max(f64::MIN_POSITIVE)
+    );
 }
 
 fn print_usage() {
     println!("GemmaAgent Rust LLM");
     println!("\nCommands:");
     println!("  cargo test");
-    println!("  cargo run --release -- train 300 [checkpoint] [--target] [--data FILE] [--checkpoint-every N] [--grad-accum N]");
+    println!("  cargo run --release -- train 300 [checkpoint] [--target] [--data FILE] [--checkpoint-every N] [--grad-accum N] [--targets-per-step N]");
     println!("  cargo run --release -- infer [checkpoint] [prompt] [--target] [--tokens N] [--temperature T] [--top-k K]");
     println!("  cargo run --release -- bench [--target] [--prompt-tokens N] [--tokens N]");
     println!("\nDefault training profile is the small CPU-debug model.");
     println!("Use --target for the 19,275,776-parameter / context=1024 / 8-head profile.");
     println!("--data FILE trains on UTF-8 text from that file; without it the built-in tiny corpus is used.");
     println!("Gradient accumulation defaults to 1; larger values increase the effective batch without a larger graph.");
+    println!("--targets-per-step controls how many causal positions are supervised in each context window; the final next-context target is always included.");
     println!("Inference uses a direct CPU runtime with KV cache; sampling defaults to greedy.");
     println!("Benchmark reports prefill and incremental decode throughput for the current CPU runtime.");
 }
@@ -220,24 +333,50 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("train") => {
             let steps = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(300);
-            let path = args.get(3).map(String::as_str).unwrap_or("gemma-agent.ckpt");
+            let path = args
+                .get(3)
+                .map(String::as_str)
+                .unwrap_or("gemma-agent.ckpt");
             let checkpoint_every = parse_usize_arg(&args, "--checkpoint-every", 0);
             let grad_accum = parse_usize_arg(&args, "--grad-accum", 1);
+            let targets_per_step = parse_usize_arg(&args, "--targets-per-step", 8);
             let data_path = parse_string_arg(&args, "--data");
-            train(steps, path, config_from_args(&args), checkpoint_every, grad_accum, data_path);
+            train(
+                steps,
+                path,
+                config_from_args(&args),
+                checkpoint_every,
+                grad_accum,
+                data_path,
+                targets_per_step,
+            );
         }
         Some("infer") => {
-            let path = args.get(2).map(String::as_str).unwrap_or("gemma-agent.ckpt");
+            let path = args
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or("gemma-agent.ckpt");
             let prompt = args.get(3).map(String::as_str).unwrap_or("Rust is");
             let max_new = parse_usize_arg(&args, "--tokens", 64);
             let temperature = parse_float_arg(&args, "--temperature", 0.0);
             let top_k = parse_usize_arg(&args, "--top-k", 0);
-            infer(path, prompt, config_from_args(&args), max_new, temperature, top_k);
+            infer(
+                path,
+                prompt,
+                config_from_args(&args),
+                max_new,
+                temperature,
+                top_k,
+            );
         }
         Some("bench") => {
             let prompt_tokens = parse_usize_arg(&args, "--prompt-tokens", 32);
             let generated_tokens = parse_usize_arg(&args, "--tokens", 32);
-            bench(config_from_args(&args), prompt_tokens, generated_tokens);
+            bench(
+                config_from_args(&args),
+                prompt_tokens,
+                generated_tokens,
+            );
         }
         _ => print_usage(),
     }
@@ -253,7 +392,7 @@ mod tests {
         let tokenizer = Tokenizer::new();
         let ids = tokenizer.encode("Rust");
         let model = Model::new(cfg, 42);
-        let loss = cross_entropy(&model, &ids[..ids.len() - 1], b'!' as usize);
+        let loss = cross_entropy(&model, &ids[..ids.len() - 1], b'!' as usize, 2);
         assert!(loss.data()[0].is_finite());
     }
 
