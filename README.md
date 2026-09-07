@@ -15,6 +15,7 @@
 - next-token cross-entropy
 - AdamW با weight decay و bias correction
 - حلقهٔ آموزش واقعی CPU
+- آموزش از corpus داخلی یا فایل متن UTF-8 با `--data`
 - gradient accumulation قابل تنظیم برای batch مؤثر بزرگ‌تر
 - checkpoint باینری shape-safe و corruption-aware
 - checkpoint دوره‌ای در طول آموزش
@@ -59,11 +60,19 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 ```
 
-آموزش سریع برای صحت‌سنجی کل pipeline:
+آموزش سریع با corpus داخلی:
 
 ```bash
 cargo run --release -- train 300
 ```
+
+آموزش از فایل متن UTF-8:
+
+```bash
+cargo run --release -- train 5000 gemma-agent.ckpt --data ./train.txt --grad-accum 8 --checkpoint-every 250
+```
+
+فایل با tokenizer بایتی فعلی به BOS/EOS + byte IDs تبدیل می‌شود. بنابراین این قابلیت برای ادامهٔ توسعه و آزمایش pipeline واقعی است؛ برای یک مدل زبانی جدی، tokenizer subword/BPE باید در مرحلهٔ بعد اضافه شود.
 
 برای batch مؤثر بزرگ‌تر و checkpoint دوره‌ای:
 
@@ -117,6 +126,6 @@ cargo run --release -- bench --target --prompt-tokens 128 --tokens 64
 
 ## وضعیت مهندسی
 
-هستهٔ مدل و runtime مستقیم اکنون قابل تست و قابل بازتولید هستند. inference از graph autograd جدا شده و KV cache دارد، ولی runtime هنوز production-grade نیست. گام‌های بعدی عبارت‌اند از tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، RMSNorm، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
+هستهٔ مدل و runtime مستقیم اکنون قابل تست و قابل بازتولید هستند. inference از graph autograd جدا شده و KV cache دارد، ولی runtime هنوز production-grade نیست. گام‌های بعدی عبارت‌اند از tokenizer subword/BPE، tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، RMSNorm، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
 
 CI فعلی compilation/lint و regression tests را روی Rust stable اجرا می‌کند.
