@@ -5,6 +5,10 @@ Downloads public-domain books plus the Tiny Shakespeare corpus, removes common
 Project Gutenberg boilerplate, normalizes text, removes duplicate paragraphs,
 and creates deterministic document-level train/validation splits.
 
+The downloader is resumable at the source level: successfully downloaded files
+are cached under data/raw and are reused on later runs. Transient and partial
+HTTP downloads are retried before a source is skipped.
+
 Outputs:
   data/train.txt
   data/val.txt
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import re
 import sys
@@ -91,21 +96,37 @@ class Document:
     sha256: str
 
 
-def fetch(url: str, timeout: int = 45, retries: int = 3) -> str:
+def fetch(url: str, timeout: int = 45, retries: int = 5) -> str:
+    """Download UTF-8 text with retries for transient/partial HTTP reads."""
     last_error: Exception | None = None
-    for attempt in range(retries):
+    for attempt in range(1, retries + 1):
         try:
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": "GemmaAgent-corpus-builder/1.0"},
+                headers={
+                    "User-Agent": "GemmaAgent-corpus-builder/1.1",
+                    "Accept-Encoding": "identity",
+                },
             )
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read()
             return raw.decode("utf-8", errors="replace")
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            urllib.error.HTTPError,
+            http.client.IncompleteRead,
+            TimeoutError,
+            OSError,
+        ) as exc:
             last_error = exc
-            time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(f"download failed: {url}: {last_error}")
+            if attempt < retries:
+                delay = min(8.0, 1.5 * attempt)
+                print(
+                    f"  retry {attempt + 1}/{retries} after download error: {exc}",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+    raise RuntimeError(f"download failed after {retries} attempts: {url}: {last_error}")
 
 
 def strip_gutenberg(text: str) -> str:
@@ -166,6 +187,8 @@ def main() -> int:
 
     if args.val_docs < 1 or args.val_docs >= len(SOURCES):
         parser.error("--val-docs must be at least 1 and smaller than the number of sources")
+    if args.min_chars < 1:
+        parser.error("--min-chars must be positive")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -179,14 +202,18 @@ def main() -> int:
     print(f"Downloading {len(SOURCES)} real sources...")
     for index, source in enumerate(SOURCES, start=1):
         print(f"[{index}/{len(SOURCES)}] {source['name']}")
-        cache_name = re.sub(r"[^a-z0-9]+", "_", source["name"].lower()).strip("_") + ".txt"
+        cache_name = (
+            re.sub(r"[^a-z0-9]+", "_", source["name"].lower()).strip("_") + ".txt"
+        )
         cache_path = raw_dir / cache_name
         try:
             if cache_path.exists() and cache_path.stat().st_size > 0:
                 text = cache_path.read_text(encoding="utf-8", errors="replace")
+                print(f"  using cache: {cache_path}")
             else:
                 text = fetch(source["url"], timeout=args.timeout)
                 cache_path.write_text(text, encoding="utf-8")
+                print(f"  cached: {cache_path}")
         except Exception as exc:
             print(f"warning: skipping {source['name']}: {exc}", file=sys.stderr)
             continue
@@ -195,7 +222,10 @@ def main() -> int:
             text = strip_gutenberg(text)
         text = normalize(text)
         if len(text) < args.min_chars:
-            print(f"warning: {source['name']} is too small after cleaning", file=sys.stderr)
+            print(
+                f"warning: {source['name']} is too small after cleaning",
+                file=sys.stderr,
+            )
             continue
 
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -215,7 +245,7 @@ def main() -> int:
 
     # Reserve whole documents for validation. This avoids near-duplicate passages
     # from the same book appearing on both sides of the split.
-    val_sources = set(name for name, _ in cleaned[-args.val_docs:])
+    val_sources = {source["name"] for source, _ in cleaned[-args.val_docs:]}
     train_parts: list[str] = []
     val_parts: list[str] = []
     seen_global: set[str] = set()
@@ -241,7 +271,7 @@ def main() -> int:
 
     manifest = {
         "name": "GemmaAgent Real Public-Domain Corpus",
-        "version": 1,
+        "version": 2,
         "description": "Deterministically prepared corpus from public-domain literature and Tiny Shakespeare for pretraining pipeline validation.",
         "generated_at_unix": int(time.time()),
         "train_file": str(train_path),
