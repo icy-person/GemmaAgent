@@ -15,12 +15,15 @@
 - next-token cross-entropy
 - AdamW با weight decay و bias correction
 - حلقهٔ آموزش واقعی CPU
+- gradient accumulation قابل تنظیم برای batch مؤثر بزرگ‌تر
 - checkpoint باینری shape-safe و corruption-aware
 - checkpoint دوره‌ای در طول آموزش
+- runtime مستقل و مستقیم CPU برای inference
+- KV cache واقعی برای decoding افزایشی
 - autoregressive inference با greedy و sampling
 - sampling با `temperature` و `top-k` بدون dependency جدید
 - initialization قطعی برای بازتولیدپذیری
-- تست‌های regression برای autograd، مدل، optimizer، tokenizer، sampling و checkpoint
+- regression test برای برابری runtime مستقیم با forward مرجع و صحت incremental KV cache
 
 ## پروفایل‌ها
 
@@ -61,21 +64,25 @@ cargo test --all-targets --all-features
 cargo run --release -- train 300
 ```
 
-برای اجرای طولانی، checkpoint دوره‌ای فعال کنید:
+برای batch مؤثر بزرگ‌تر و checkpoint دوره‌ای:
 
 ```bash
-cargo run --release -- train 10000 gemma-agent.ckpt --checkpoint-every 100
+cargo run --release -- train 10000 gemma-agent.ckpt --grad-accum 8 --checkpoint-every 100
 ```
 
 آموزش پروفایل هدف:
 
 ```bash
-cargo run --release -- train 300 gemma-agent-target.ckpt --target --checkpoint-every 25
+cargo run --release -- train 300 gemma-agent-target.ckpt --target --grad-accum 4 --checkpoint-every 25
 ```
 
-> هشدار: kernelهای فعلی عمداً scalar و CPU-only هستند. بنابراین پروفایل ۱۹ میلیون پارامتری از نظر زمانی آموزشی و برای توسعهٔ سریع مناسب نیست. هدف این نسخه، تثبیت correctness و architecture است.
+> هشدار: kernelهای آموزشی فعلی عمداً scalar و CPU-only هستند. بنابراین پروفایل ۱۹ میلیون پارامتری از نظر زمانی آموزشی مناسب توسعهٔ سریع نیست. هدف این نسخه، تثبیت correctness و architecture است.
 
-Inference greedy:
+## Inference
+
+Inference اکنون checkpoint را به runtime مستقیم CPU منتقل می‌کند؛ graph مربوط به autograd در هر token ساخته نمی‌شود و KV cache برای decoding افزایشی نگهداری می‌شود.
+
+Greedy:
 
 ```bash
 cargo run --release -- infer gemma-agent.ckpt "Rust is"
@@ -93,10 +100,10 @@ cargo run --release -- infer gemma-agent.ckpt "Rust is" --temperature 0.8 --top-
 cargo run --release -- infer gemma-agent-target.ckpt "Rust is" --target --temperature 0.8 --top-k 40 --tokens 128
 ```
 
-`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--checkpoint-every 0` یا حذف این گزینه، checkpoint دوره‌ای را غیرفعال می‌کند.
+`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--checkpoint-every 0` یا حذف این گزینه، checkpoint دوره‌ای را غیرفعال می‌کند. `--grad-accum 1` یعنی یک update برای هر window آموزشی.
 
 ## وضعیت مهندسی
 
-این repository اکنون یک هستهٔ مستقل و قابل تست دارد، اما هنوز یک runtime سریع تولیدی نیست. مرحلهٔ بعدی منطقی عبارت است از tensorهای contiguous و kernelهای SIMD، threading، memory planning، mixed precision، KV cache، batching و سپس backendهای Vulkan/CUDA/ROCm.
+هستهٔ مدل و runtime مستقیم اکنون قابل تست و قابل بازتولید هستند، اما هنوز یک runtime سریع تولیدی نیست. گام‌های بعدی عبارت‌اند از tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، RMSNorm، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
 
 CI فعلی compilation/lint و regression tests را روی Rust stable اجرا می‌کند.
