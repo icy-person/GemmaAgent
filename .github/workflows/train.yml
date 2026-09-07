@@ -21,9 +21,9 @@ on:
         default: "8"
         type: string
       targets_per_step:
-        description: "Random token positions sampled from each context"
+        description: "Unique causal target positions sampled from each context"
         required: true
-        default: "128"
+        default: "256"
         type: string
       eval_samples:
         description: "Held-out validation windows after each stage"
@@ -137,7 +137,7 @@ jobs:
           STAGE_STEPS="${{ inputs.stage_steps || '100' }}"
           RUNTIME_MINUTES="${{ inputs.runtime_minutes || '330' }}"
           GRAD_ACCUM="${{ inputs.grad_accum || '8' }}"
-          TARGETS_PER_STEP="${{ inputs.targets_per_step || '128' }}"
+          TARGETS_PER_STEP="${{ inputs.targets_per_step || '256' }}"
           EVAL_SAMPLES="${{ inputs.eval_samples || '16' }}"
           ONLINE_PAGES="${{ inputs.online_pages || '160' }}"
           DEADLINE=$(( $(date +%s) + RUNTIME_MINUTES * 60 ))
@@ -181,6 +181,8 @@ jobs:
               --grad-accum "$GRAD_ACCUM"
               --targets-per-step "$TARGETS_PER_STEP"
               --eval-samples "$EVAL_SAMPLES"
+              --warmup 20
+              --min-lr-ratio 0.1
               --lr "$LR"
               --checkpoint-every 25)
 
@@ -216,6 +218,8 @@ jobs:
           stage_steps=${STAGE_STEPS}
           grad_accum=${GRAD_ACCUM}
           targets_per_step=${TARGETS_PER_STEP}
+          warmup=20
+          min_lr_ratio=0.1
           eval_samples=${EVAL_SAMPLES}
           train_context=512
           curriculum=00-bootstrap,01-literature,02-code,03-math,04-reasoning,05-balanced,06-online-wikipedia
