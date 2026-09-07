@@ -12,7 +12,7 @@ use burn::{
     prelude::*,
     tensor::{Int, Tensor, TensorData},
 };
-use burn_wgpu::Wgpu;
+use burn_wgpu::{graphics::Vulkan, init_setup, Wgpu, WgpuDevice};
 use std::time::Instant;
 
 use crate::{config::Config, tokenizer::Tokenizer};
@@ -92,6 +92,17 @@ impl<B: Backend> AmdModel<B> {
     }
 }
 
+fn make_device(gpu_index: usize, gpu_kind: &str) -> WgpuDevice {
+    let device = match gpu_kind {
+        "integrated" => WgpuDevice::IntegratedGpu(gpu_index),
+        "discrete" => WgpuDevice::DiscreteGpu(gpu_index),
+        "best" => WgpuDevice::BestAvailable,
+        other => panic!("invalid --gpu-kind '{other}', expected integrated, discrete, or best"),
+    };
+    init_setup::<Vulkan>(&device, Default::default());
+    device
+}
+
 fn make_batch(
     encoded: &[usize],
     context: usize,
@@ -133,12 +144,13 @@ pub fn train(
     lr: f64,
     checkpoint_every: usize,
     gpu_index: usize,
+    gpu_kind: &str,
 ) {
     cfg.validate();
     assert!(steps > 0 && batch_size > 0 && grad_accum > 0);
     assert!(lr.is_finite() && lr > 0.0);
 
-    let device = burn_wgpu::WgpuDevice::DiscreteGpu(gpu_index);
+    let device = make_device(gpu_index, gpu_kind);
     let model_cfg = AmdModelConfig::new(cfg);
     let mut model: AmdModel<AmdBackend> = model_cfg.init(&device);
     let mut optimizer = AdamWConfig::new()
@@ -156,7 +168,7 @@ pub fn train(
 
     let warmup = (steps / 20).max(10).min(steps);
     println!("AMD Vulkan backend: Burn WGPU");
-    println!("GPU index: {gpu_index}");
+    println!("GPU kind: {gpu_kind} | index: {gpu_index}");
     println!(
         "model: vocab={} context={} d_model={} layers={} heads={} ffn={}",
         cfg.vocab, cfg.context, cfg.d_model, cfg.layers, cfg.heads, cfg.ffn
@@ -174,7 +186,6 @@ pub fn train(
     for update in 0..steps {
         let current_lr = cosine_lr(lr, 0.1, update, warmup, steps);
         let mut combined_loss: Option<Tensor<AmdBackend, 1>> = None;
-
         for micro in 0..grad_accum {
             let logical_step = update * grad_accum + micro;
             let (xs, ys) = make_batch(&encoded, cfg.context, batch_size, logical_step, &device);
@@ -197,7 +208,6 @@ pub fn train(
 
         interval_loss += loss_value;
         interval_updates += 1;
-
         if update % 10 == 9 || update + 1 == steps {
             let elapsed = last.elapsed().as_secs_f64().max(1e-9);
             let avg_loss = interval_loss / interval_updates as f64;
@@ -234,13 +244,14 @@ pub fn train(
 pub fn benchmark(
     cfg: Config,
     gpu_index: usize,
+    gpu_kind: &str,
     batch_size: usize,
     context: usize,
     iterations: usize,
 ) {
     cfg.validate();
     assert!(batch_size > 0 && context > 0 && context <= cfg.context && iterations > 0);
-    let device = burn_wgpu::WgpuDevice::DiscreteGpu(gpu_index);
+    let device = make_device(gpu_index, gpu_kind);
     let model_cfg = AmdModelConfig::new(cfg);
     let model: AmdModel<AmdBase> = model_cfg.init(&device);
     let ids = Tensor::<AmdBase, 2, Int>::zeros([batch_size, context], &device);
@@ -253,7 +264,7 @@ pub fn benchmark(
     }
     let seconds = start.elapsed().as_secs_f64().max(1e-9);
     println!(
-        "AMD Vulkan forward: {:.0} tok/s",
+        "AMD Vulkan forward ({gpu_kind} GPU {gpu_index}): {:.0} tok/s",
         (batch_size * context * iterations) as f64 / seconds
     );
 }
