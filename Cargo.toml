@@ -7,9 +7,15 @@ description="A clean-room educational language model implemented in Rust"
 license="MIT"
 
 [features]
-default=[]
+default=["runner-cpu"]
+# Portable scalar Rust backend used by GitHub Actions/CPU runners.
+runner-cpu=[]
+# Optional NVIDIA/CUDA path for supported desktop systems.
 cuda=["dep:candle-core","dep:candle-nn","candle-core/cuda","candle-nn/cuda"]
+# Desktop Linux AMD/Intel Vulkan path through Burn + WGPU.
 amd-vulkan=["dep:burn","dep:burn-wgpu","burn/std","burn/autodiff","burn/wgpu","burn/fusion"]
+# Android GPU path through the same Burn/WGPU Vulkan engine, built for arm64-v8a.
+android-vulkan=["dep:burn","dep:burn-wgpu","burn/std","burn/autodiff","burn/wgpu","burn/fusion"]
 
 [dependencies]
 candle-core={version="0.11.0",default-features=false,optional=true}
