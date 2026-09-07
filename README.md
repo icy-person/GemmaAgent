@@ -1,55 +1,45 @@
-# GemmaAgent → gemma-rs
+# GemmaAgent / gemma-rs
 
-یک پروژهٔ clean-room برای ساخت یک مدل زبانی کوچک با Rust، بدون استفاده از source یا weights مدل‌های Google.
+یک موتور آموزشی مدل زبانی از پایه و با Rust خالص. این پروژه شامل کد یا وزن‌های Google Gemma نیست.
 
-## مدل فعلی
+## اکنون چه چیزی داریم؟
 
-- Decoder-only Transformer
-- 6 لایه
-- `d_model = 416`
-- 8 attention heads
-- `head_dim = 52`
-- `FFN = 1664`
-- context = 1024 token
-- vocabulary = 16384
-- RoPE
-- RMSNorm
-- SwiGLU-style feed-forward block
-- tied input/output embeddings
-- CPU و بدون dependency خارجی
-
-## هستهٔ آموزش
-
-- Tensor/Matrix primitives
-- Cross-entropy + logits gradient
+- reverse-mode Autograd با تست گرادیان
+- ماتریس و `matmul` با گرادیان
+- ReLU، Softmax، Log، Gather، concat و slicing
+- causal multi-head self-attention
+- decoder blocks با residual + feed-forward
+- embeddingهای مشترک ورودی/خروجی
+- tokenizer بایتی
+- next-token cross-entropy
 - AdamW
-- Autograd گرافی با backward برای `add` و `matmul`
-- تست گرادیان برای matmul
+- حلقهٔ آموزش واقعی CPU
+- ذخیره و بارگذاری checkpoint باینری
+- autoregressive greedy inference
+- initialization قطعی برای بازتولیدپذیری
 
-وزن‌های Transformer هنوز تصادفی هستند و مدل آموزش‌دیده نیست. مرحلهٔ بعدی، اتصال autograd به تمام عملیات Transformer و ساخت data loader و training loop واقعی است.
+## مدل قابل آموزش
+
+برای اینکه کل مسیر روی CPU قابل آزمایش باشد، اجرای پیش‌فرض از مدل کوچک استفاده می‌کند:
+
+`vocab=258 | context=128 | d_model=64 | layers=2 | heads=4 | ffn=128`
+
+پروفایل هدف بزرگ‌تر نیز در `Config::target()` وجود دارد:
+
+`vocab=16384 | context=1024 | d_model=416 | layers=6 | heads=8 | ffn=1664`
+
+این پروفایل حدود ۱۹ میلیون پارامتر دارد، اما موتور فعلی عمداً آموزشی و scalar است و برای آموزش این اندازه هنوز kernelهای SIMD/GPU ندارد.
 
 ## اجرا
 
 ```bash
-cargo run --release
-```
-
-بررسی کد:
-
-```bash
-cargo fmt --check
-cargo check
 cargo test
+cargo run --release -- train 300
+cargo run --release -- infer gemma-agent.ckpt "Rust is"
 ```
 
-## نقشهٔ راه
+بعد از آموزش، checkpoint در `gemma-agent.ckpt` ساخته می‌شود.
 
-1. اتصال autograd به Transformer
-2. cross-entropy روی sequence logits
-3. AdamW روی تمام پارامترهای مدل
-4. tokenizer واقعی BPE/SentencePiece-compatible
-5. dataset و streaming data loader
-6. checkpoint format
-7. gradient accumulation و mixed precision
-8. KV cache برای inference
-9. SIMD و Vulkan backend
+## گام بعدی برای نسخهٔ جدی
+
+بهینه‌سازی tensor kernels، threading، mixed precision، KV cache، sampling و سپس backendهای Vulkan/CUDA/ROCm باید بعد از تثبیت این هسته اضافه شوند.
