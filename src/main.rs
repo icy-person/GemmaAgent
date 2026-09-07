@@ -39,7 +39,7 @@ fn train(steps: usize, path: &str, cfg: Config) {
     let tokenizer = Tokenizer::new();
     let encoded = tokenizer.encode(&tokenizer::tiny_corpus());
     assert!(
-        encoded.len() > cfg.context + 2,
+        encoded.len() > cfg.context + 1,
         "training corpus is shorter than the configured context"
     );
 
@@ -56,11 +56,15 @@ fn train(steps: usize, path: &str, cfg: Config) {
 
     let model = Model::new(cfg, 42);
     let parameters = model.parameters();
-    let mut optimizer = AdamW::new(if cfg == Config::target() { 0.0005 } else { 0.002 });
+    let mut optimizer = AdamW::new(if cfg == Config::target() {
+        0.0005
+    } else {
+        0.002
+    });
 
+    let window_count = encoded.len() - cfg.context;
     for step in 1..=steps {
-        let max_start = encoded.len() - cfg.context - 1;
-        let start = (step - 1) % max_start;
+        let start = (step - 1) % window_count;
         let loss = cross_entropy(
             &model,
             &encoded[start..start + cfg.context],
