@@ -93,6 +93,7 @@ jobs:
           ONLINE_PAGES: ${{ inputs.online_pages || '160' }}
         run: |
           python3 scripts/prepare_online_corpus.py \
+            --refresh \
             --max-pages "$ONLINE_PAGES" \
             --pages-per-topic 10 \
             --min-chars 300 \
