@@ -1,0 +1,10 @@
+[package]
+name = "gemma-rs"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
