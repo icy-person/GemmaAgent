@@ -1,25 +1,4 @@
-pub const BOS: usize = 256;
-pub const EOS: usize = 257;
-pub const VOCAB_USED: usize = 258;
-
-#[derive(Default)]
-pub struct ByteTokenizer;
-
-impl ByteTokenizer {
-    pub fn new() -> Self { Self }
-
-    pub fn encode(&self, text: &str, add_bos: bool, add_eos: bool) -> Vec<usize> {
-        let mut ids = Vec::with_capacity(text.len() + 2);
-        if add_bos { ids.push(BOS); }
-        ids.extend(text.as_bytes().iter().map(|&b| b as usize));
-        if add_eos { ids.push(EOS); }
-        ids
-    }
-
-    pub fn decode(&self, ids: &[usize]) -> String {
-        let bytes: Vec<u8> = ids.iter()
-            .filter_map(|&id| if id < 256 { Some(id as u8) } else { None })
-            .collect();
-        String::from_utf8_lossy(&bytes).into_owned()
-    }
-}
+pub const BOS:usize=256;pub const EOS:usize=257;
+pub struct Tokenizer;
+impl Tokenizer{pub fn new()->Self{Self}pub fn encode(&self,s:&str)->Vec<usize>{let mut v=Vec::with_capacity(s.len()+2);v.push(BOS);v.extend(s.bytes().map(|b|b as usize));v.push(EOS);v}pub fn decode(&self,t:&[usize])->String{String::from_utf8_lossy(&t.iter().filter_map(|&x|if x<256{Some(x as u8)}else{None}).collect::<Vec<_>>()).into_owned()}}
+pub fn tiny_corpus()->String{"Rust is a systems programming language. A small language model learns to predict the next token. Rust makes the engine fast and explicit. ".repeat(64)}
