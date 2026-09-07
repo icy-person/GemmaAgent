@@ -5,13 +5,13 @@ pub struct Linear {
 }
 
 impl Linear {
-    fn new(i: usize, o: usize, seed: &mut u64) -> Self {
+    fn new(input: usize, output: usize, seed: &mut u64) -> Self {
         Self {
-            w: Value::parameter(o, i, seed),
+            w: Value::parameter(output, input, seed),
         }
     }
 
-    fn f(&self, x: &Value) -> Value {
+    fn forward(&self, x: &Value) -> Value {
         x.matmul(&self.w.transpose())
     }
 }
@@ -59,19 +59,19 @@ impl Model {
 
     fn positional_encoding(&self, pos: usize) -> Value {
         let d = self.cfg.d_model;
-        let mut values = vec![0.0; d];
+        let mut values = Vec::with_capacity(d);
         for i in 0..d {
             let exponent = (2 * (i / 2)) as f32 / d as f32;
             let angle = pos as f32 / 10000.0_f32.powf(exponent);
-            values[i] = if i % 2 == 0 { angle.sin() } else { angle.cos() };
+            values.push(if i % 2 == 0 { angle.sin() } else { angle.cos() });
         }
         Value::leaf(1, d, values)
     }
 
-    fn attn(&self, block: &Block, states: &[Value], pos: usize) -> Value {
-        let q = block.q.f(&states[pos]);
-        let keys: Vec<Value> = states[..=pos].iter().map(|x| block.k.f(x)).collect();
-        let values: Vec<Value> = states[..=pos].iter().map(|x| block.v.f(x)).collect();
+    fn attention(&self, block: &Block, states: &[Value], pos: usize) -> Value {
+        let q = block.q.forward(&states[pos]);
+        let keys: Vec<Value> = states[..=pos].iter().map(|x| block.k.forward(x)).collect();
+        let values: Vec<Value> = states[..=pos].iter().map(|x| block.v.forward(x)).collect();
         let head_dim = self.cfg.head_dim();
         let mut heads = Vec::with_capacity(self.cfg.heads);
 
@@ -91,7 +91,7 @@ impl Model {
             heads.push(weights.matmul(&Value::concat_rows(&head_values)));
         }
 
-        block.o.f(&Value::concat_cols(&heads))
+        block.o.forward(&Value::concat_cols(&heads))
     }
 
     pub fn forward_hidden(&self, tokens: &[usize]) -> Value {
@@ -108,9 +108,9 @@ impl Model {
         for block in &self.blocks {
             let mut next = Vec::with_capacity(states.len());
             for pos in 0..states.len() {
-                let residual = states[pos].add(&self.attn(block, &states, pos));
-                let hidden = block.up.f(&residual).silu();
-                next.push(residual.add(&block.down.f(&hidden)));
+                let residual = states[pos].add(&self.attention(block, &states, pos));
+                let hidden = block.up.forward(&residual).silu();
+                next.push(residual.add(&block.down.forward(&hidden)));
             }
             states = next;
         }
@@ -123,9 +123,9 @@ impl Model {
     }
 
     pub fn parameters(&self) -> Vec<Value> {
-        let mut p = vec![self.emb.clone()];
+        let mut parameters = vec![self.emb.clone()];
         for block in &self.blocks {
-            p.extend([
+            parameters.extend([
                 block.q.w.clone(),
                 block.k.w.clone(),
                 block.v.w.clone(),
@@ -134,7 +134,7 @@ impl Model {
                 block.down.w.clone(),
             ]);
         }
-        p
+        parameters
     }
 }
 
@@ -146,11 +146,7 @@ mod tests {
     fn target_parameter_count_is_exact() {
         let cfg = Config::target();
         let model = Model::new(cfg, 42);
-        let total: usize = model
-            .parameters()
-            .iter()
-            .map(|p| p.data().len())
-            .sum();
+        let total: usize = model.parameters().iter().map(|p| p.data().len()).sum();
         assert_eq!(total, 19_275_776);
         assert_eq!(cfg.params(), total);
     }
