@@ -89,10 +89,8 @@ fn train(
         if accumulated == grad_accum || step == steps {
             optimizer.step(&parameters);
             let mean_loss = loss_sum / accumulated as f32;
-            println!(
-                "update {:4} (step {step:4}) mean_loss {mean_loss:.5}",
-                optimizer.timestep()
-            );
+            let update = (step - 1) / grad_accum + 1;
+            println!("update {update:4} (step {step:4}) mean_loss {mean_loss:.5}");
             accumulated = 0;
             loss_sum = 0.0;
         }
@@ -223,9 +221,7 @@ fn bench(cfg: Config, prompt_tokens: usize, generated_tokens: usize) {
     assert!(prompt_tokens + generated_tokens <= cfg.context);
     let model = Model::new(cfg, 42);
     let runtime = RuntimeModel::from_parameters(cfg, &model.parameters());
-    let tokens: Vec<usize> = (0..prompt_tokens)
-        .map(|i| 65 + (i % 26))
-        .collect();
+    let tokens: Vec<usize> = (0..prompt_tokens).map(|i| 65 + (i % 26)).collect();
     let mut cache = runtime.new_cache();
 
     let start = Instant::now();
