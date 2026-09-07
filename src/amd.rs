@@ -4,23 +4,23 @@ use burn::{
     backend::Autodiff,
     module::Module,
     nn::{
-        Embedding, EmbeddingConfig, RmsNorm, RmsNormConfig,
+        Embedding, EmbeddingConfig, Linear, LinearConfig, RmsNorm, RmsNormConfig,
         loss::CrossEntropyLossConfig,
         transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput},
     },
     optim::{AdamWConfig, GradientsParams, Optimizer},
     prelude::*,
-    tensor::{Int, Tensor, TensorData, activation::log_softmax},
+    tensor::{Int, Tensor, TensorData},
 };
 use burn_wgpu::Wgpu;
-use std::{path::Path, time::Instant};
+use std::time::Instant;
 
 use crate::{config::Config, tokenizer::Tokenizer};
 
 pub type AmdBase = Wgpu<f32, i32>;
 pub type AmdBackend = Autodiff<AmdBase>;
 
-const EPS: f64 = 1e-5;
+const EPSILON: f64 = 1e-5;
 
 #[derive(Module, Debug)]
 pub struct AmdModel<B: Backend> {
@@ -28,12 +28,9 @@ pub struct AmdModel<B: Backend> {
     pub position_embedding: Embedding<B>,
     pub transformer: TransformerEncoder<B>,
     pub final_norm: RmsNorm<B>,
-}
-
-impl AmdModelConfig {
-    fn new(cfg: Config) -> Self {
-        Self { cfg }
-    }
+    pub output: Linear<B>,
+    pub vocab: usize,
+    pub context: usize,
 }
 
 pub struct AmdModelConfig {
@@ -41,6 +38,11 @@ pub struct AmdModelConfig {
 }
 
 impl AmdModelConfig {
+    pub fn new(cfg: Config) -> Self {
+        cfg.validate();
+        Self { cfg }
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> AmdModel<B> {
         let transformer = TransformerEncoderConfig::new(
             self.cfg.d_model,
@@ -50,6 +52,7 @@ impl AmdModelConfig {
         )
         .with_dropout(0.0)
         .with_norm_first(true)
+        .with_layer_norm_eps(EPSILON)
         .init(device);
 
         AmdModel {
@@ -57,36 +60,35 @@ impl AmdModelConfig {
             position_embedding: EmbeddingConfig::new(self.cfg.context, self.cfg.d_model).init(device),
             transformer,
             final_norm: RmsNormConfig::new(self.cfg.d_model)
-                .with_epsilon(EPS)
+                .with_epsilon(EPSILON)
                 .init(device),
+            output: LinearConfig::new(self.cfg.d_model, self.cfg.vocab)
+                .with_bias(false)
+                .init(device),
+            vocab: self.cfg.vocab,
+            context: self.cfg.context,
         }
     }
 }
 
 impl<B: Backend> AmdModel<B> {
-    pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+    pub fn forward_hidden(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let [batch, seq] = tokens.dims();
-        assert!(seq <= self.position_embedding.devices()[0].clone().into());
-        let positions = Tensor::<B, 1, Int>::arange(0..seq as i64, &tokens.device())
+        assert!(seq > 0 && seq <= self.context);
+        let device = tokens.device();
+        let positions = Tensor::<B, 1, Int>::arange(0..seq as i64, &device)
             .reshape([1, seq])
             .repeat_dim(0, batch);
         let x = self.token_embedding.forward(tokens) + self.position_embedding.forward(positions);
-        let mask = burn::nn::attention::generate_autoregressive_mask(batch, seq, &x.device());
-        let x = self.transformer.forward(TransformerEncoderInput::new(x).mask_attn(mask));
-        self.final_norm.forward(x)
+        let mask = burn::nn::attention::generate_autoregressive_mask(batch, seq, &device);
+        let encoded = self
+            .transformer
+            .forward(TransformerEncoderInput::new(x).mask_attn(mask));
+        self.final_norm.forward(encoded)
     }
 
-    pub fn logits(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
-        let [batch, seq, d] = hidden.dims();
-        let flat = hidden.reshape([batch * seq, d]);
-        let weight = self.token_embedding.weight.val().transpose();
-        flat.matmul(weight).reshape([batch, seq, self.cfg().vocab])
-    }
-
-    pub fn cfg(&self) -> Config {
-        // The AMD path is constructed from Config::debug or Config::target externally.
-        // This helper is overridden by the caller through stored dimensions in tensors.
-        unimplemented!("AmdModel::cfg is only a placeholder and should not be called")
+    pub fn forward_logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        self.output.forward(self.forward_hidden(tokens))
     }
 }
 
@@ -94,21 +96,31 @@ fn make_batch(
     encoded: &[usize],
     context: usize,
     batch_size: usize,
-    step: usize,
+    logical_step: usize,
     device: &<AmdBackend as Backend>::Device,
 ) -> (Tensor<AmdBackend, 2, Int>, Tensor<AmdBackend, 2, Int>) {
     let window_count = encoded.len() - context;
-    let mut x = Vec::with_capacity(batch_size * context);
-    let mut y = Vec::with_capacity(batch_size * context);
+    let mut xs = Vec::with_capacity(batch_size * context);
+    let mut ys = Vec::with_capacity(batch_size * context);
     for b in 0..batch_size {
-        let start = (step * batch_size + b) % window_count;
-        x.extend(encoded[start..start + context].iter().map(|&v| v as i64));
-        y.extend(encoded[start + 1..start + context + 1].iter().map(|&v| v as i64));
+        let start = (logical_step * batch_size + b) % window_count;
+        xs.extend(encoded[start..start + context].iter().map(|&v| v as i64));
+        ys.extend(encoded[start + 1..start + context + 1].iter().map(|&v| v as i64));
     }
     (
-        Tensor::from_data(TensorData::new(x, [batch_size, context]), device),
-        Tensor::from_data(TensorData::new(y, [batch_size, context]), device),
+        Tensor::from_data(TensorData::new(xs, [batch_size, context]), device),
+        Tensor::from_data(TensorData::new(ys, [batch_size, context]), device),
     )
+}
+
+fn cosine_lr(base: f64, min_ratio: f64, step: usize, warmup: usize, total: usize) -> f64 {
+    if step < warmup {
+        return base * (step + 1) as f64 / warmup.max(1) as f64;
+    }
+    let decay_steps = total.saturating_sub(warmup).max(1);
+    let progress = (step.saturating_sub(warmup) as f64 / decay_steps as f64).clamp(0.0, 1.0);
+    let cosine = 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
+    base * (min_ratio + (1.0 - min_ratio) * cosine)
 }
 
 pub fn train(
@@ -126,113 +138,135 @@ pub fn train(
     assert!(steps > 0 && batch_size > 0 && grad_accum > 0);
     assert!(lr.is_finite() && lr > 0.0);
 
-    let device = burn::backend::wgpu::WgpuDevice::DiscreteGpu(gpu_index);
+    let device = burn_wgpu::WgpuDevice::DiscreteGpu(gpu_index);
     let model_cfg = AmdModelConfig::new(cfg);
     let mut model: AmdModel<AmdBackend> = model_cfg.init(&device);
     let mut optimizer = AdamWConfig::new()
-        .with_beta1(0.9)
-        .with_beta2(0.95)
+        .with_beta_1(0.9)
+        .with_beta_2(0.95)
         .with_epsilon(1e-8)
         .with_weight_decay(0.1)
         .init();
 
     let tokenizer = Tokenizer::new();
-    let corpus = std::fs::read_to_string(data_path).expect("failed to read training data");
+    let corpus = std::fs::read_to_string(data_path)
+        .unwrap_or_else(|e| panic!("failed to read training data '{data_path}': {e}"));
     let encoded = tokenizer.encode(&corpus);
-    assert!(encoded.len() > cfg.context + 1, "training corpus is too short");
+    assert!(encoded.len() > cfg.context + 1, "training corpus is shorter than context");
 
-    println!("AMD Vulkan backend: Burn WGPU device {gpu_index}");
-    println!("model: vocab={} context={} d_model={} layers={} heads={} ffn={}", cfg.vocab, cfg.context, cfg.d_model, cfg.layers, cfg.heads, cfg.ffn);
-    println!("batch={} grad_accum={} lr={:.6} corpus={} bytes", batch_size, grad_accum, lr, corpus.len());
-    println!("checkpoint: {checkpoint}");
+    let warmup = (steps / 20).max(10).min(steps);
+    println!("AMD Vulkan backend: Burn WGPU");
+    println!("GPU index: {gpu_index}");
+    println!(
+        "model: vocab={} context={} d_model={} layers={} heads={} ffn={}",
+        cfg.vocab, cfg.context, cfg.d_model, cfg.layers, cfg.heads, cfg.ffn
+    );
+    println!("batch-size={batch_size} grad-accum={grad_accum}");
+    println!("base-lr={lr:.6} warmup={warmup} min-lr-ratio=0.1");
+    println!("corpus={} bytes", corpus.len());
+    println!("checkpoint={checkpoint}");
 
-    if Path::new(checkpoint).exists() {
-        println!("warning: AMD checkpoint loading is intentionally disabled until optimizer-state compatible resume is implemented");
-    }
-
+    let loss_fn = CrossEntropyLossConfig::new().init(&device);
     let mut interval_loss = 0.0f64;
-    let mut interval_steps = 0usize;
+    let mut interval_updates = 0usize;
     let mut last = Instant::now();
 
     for update in 0..steps {
-        let mut grads_all = None;
-        let mut loss_sum = 0.0f64;
+        let current_lr = cosine_lr(lr, 0.1, update, warmup, steps);
+        let mut combined_loss: Option<Tensor<AmdBackend, 1>> = None;
 
         for micro in 0..grad_accum {
-            let logical = update * grad_accum + micro;
-            let (xs, ys) = make_batch(&encoded, cfg.context, batch_size, logical, &device);
-            let hidden = model.forward(xs);
-            let logits = {
-                let [b, t, d] = hidden.dims();
-                let flat = hidden.reshape([b * t, d]);
-                flat.matmul(model.token_embedding.weight.val().transpose())
-                    .reshape([b, t, cfg.vocab])
-            };
+            let logical_step = update * grad_accum + micro;
+            let (xs, ys) = make_batch(&encoded, cfg.context, batch_size, logical_step, &device);
+            let logits = model.forward_logits(xs);
             let flat_logits = logits.reshape([batch_size * cfg.context, cfg.vocab]);
             let flat_targets = ys.reshape([batch_size * cfg.context]);
-            let loss = CrossEntropyLossConfig::new()
-                .init(&flat_logits.device())
-                .forward(flat_logits, flat_targets)
-                / grad_accum as f64;
-            loss_sum += loss.clone().into_scalar::<f32>() as f64 * grad_accum as f64;
-            let grads = loss.backward();
-            let param_grads = GradientsParams::from_grads(grads, &model);
-            grads_all = Some(match grads_all {
-                Some(existing) => existing.merge(param_grads),
-                None => param_grads,
+            let loss = loss_fn.forward(flat_logits, flat_targets);
+            let scaled = loss / grad_accum as f64;
+            combined_loss = Some(match combined_loss {
+                Some(previous) => previous + scaled,
+                None => scaled,
             });
         }
 
-        if let Some(grads) = grads_all {
-            model = optimizer.step(lr, model, grads);
-        }
+        let loss = combined_loss.expect("at least one micro-batch is required");
+        let loss_value = loss.clone().into_scalar::<f32>() as f64;
+        let grads = loss.backward();
+        let grads = GradientsParams::from_grads(grads, &model);
+        model = optimizer.step(current_lr, model, grads);
 
-        interval_loss += loss_sum / grad_accum as f64;
-        interval_steps += 1;
+        interval_loss += loss_value;
+        interval_updates += 1;
 
         if update % 10 == 9 || update + 1 == steps {
-            let seconds = last.elapsed().as_secs_f64().max(1e-9);
-            let avg = interval_loss / interval_steps as f64;
-            let tok = (batch_size * cfg.context * grad_accum * interval_steps) as f64;
-            println!("amd update {:5} loss {:.5} | {:.0} tok/s", update + 1, avg, tok / seconds);
+            let elapsed = last.elapsed().as_secs_f64().max(1e-9);
+            let avg_loss = interval_loss / interval_updates as f64;
+            let tokens = (batch_size * cfg.context * grad_accum * interval_updates) as f64;
+            println!(
+                "amd update {:5} loss {:.5} lr {:.6} | {:.0} tok/s",
+                update + 1,
+                avg_loss,
+                current_lr,
+                tokens / elapsed
+            );
             interval_loss = 0.0;
-            interval_steps = 0;
+            interval_updates = 0;
             last = Instant::now();
         }
 
         if checkpoint_every > 0 && (update + 1) % checkpoint_every == 0 {
             let recorder = burn::record::BinFileRecorder::<burn::record::FullPrecisionSettings>::default();
-            model.clone().save_file(checkpoint, &recorder).expect("failed to save AMD checkpoint");
+            model
+                .clone()
+                .save_file(checkpoint, &recorder)
+                .expect("failed to save AMD checkpoint");
             println!("AMD checkpoint: {checkpoint} (update {})", update + 1);
         }
     }
 
     let recorder = burn::record::BinFileRecorder::<burn::record::FullPrecisionSettings>::default();
-    model.save_file(checkpoint, &recorder).expect("failed to save AMD checkpoint");
+    model
+        .save_file(checkpoint, &recorder)
+        .expect("failed to save AMD checkpoint");
     println!("AMD checkpoint: {checkpoint}");
 }
 
-pub fn benchmark(cfg: Config, gpu_index: usize, batch_size: usize, context: usize, iterations: usize) {
-    let device = burn::backend::wgpu::WgpuDevice::DiscreteGpu(gpu_index);
+pub fn benchmark(
+    cfg: Config,
+    gpu_index: usize,
+    batch_size: usize,
+    context: usize,
+    iterations: usize,
+) {
+    cfg.validate();
+    assert!(batch_size > 0 && context > 0 && context <= cfg.context && iterations > 0);
+    let device = burn_wgpu::WgpuDevice::DiscreteGpu(gpu_index);
     let model_cfg = AmdModelConfig::new(cfg);
     let model: AmdModel<AmdBase> = model_cfg.init(&device);
     let ids = Tensor::<AmdBase, 2, Int>::zeros([batch_size, context], &device);
-
     for _ in 0..3 {
-        let _ = model.forward(ids.clone());
+        let _ = model.forward_logits(ids.clone());
     }
-
     let start = Instant::now();
     for _ in 0..iterations {
-        let _ = model.forward(ids.clone());
+        let _ = model.forward_logits(ids.clone());
     }
-    let secs = start.elapsed().as_secs_f64().max(1e-9);
-    println!("AMD Vulkan benchmark: {} tok/s", (batch_size * context * iterations) as f64 / secs);
+    let seconds = start.elapsed().as_secs_f64().max(1e-9);
+    println!(
+        "AMD Vulkan forward: {:.0} tok/s",
+        (batch_size * context * iterations) as f64 / seconds
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_warms_and_reaches_floor() {
+        assert!(cosine_lr(1.0, 0.1, 0, 10, 100) < cosine_lr(1.0, 0.1, 9, 10, 100));
+        assert!((cosine_lr(1.0, 0.1, 99, 10, 100) - 0.1).abs() < 1e-6);
+    }
 
     #[test]
     fn amd_backend_types_are_distinct() {
