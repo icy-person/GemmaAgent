@@ -14,9 +14,6 @@ mod config;
 mod tokenizer;
 
 #[cfg(feature = "android-vulkan")]
-use burn::module::Module;
-
-#[cfg(feature = "android-vulkan")]
 fn parse_usize(args: &[String], name: &str, default: usize) -> usize {
     args.iter()
         .position(|arg| arg == name)
@@ -173,8 +170,3 @@ fn main() {
     eprintln!("android-infer requires the `android-vulkan` feature.");
     eprintln!("For Android arm64: cargo ndk -t arm64-v8a build --release --features android-vulkan --bin android-infer");
 }
-
-#[cfg(feature = "android-vulkan")]
-const _: fn() = || {
-    let _ = core::mem::size_of::<burn::module::Module>();
-};
