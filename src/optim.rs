@@ -1,5 +1,3 @@
-use crate::autograd::Value;
-use std::collections::HashMap;
-
-pub struct AdamW{step:usize,lr:f32,b1:f32,b2:f32,eps:f32,wd:f32,m:HashMap<usize,Vec<f32>>,v:HashMap<usize,Vec<f32>>}
-impl AdamW{pub fn new(lr:f32)->Self{Self{step:0,lr,b1:.9,b2:.999,eps:1e-8,wd:.01,m:HashMap::new(),v:HashMap::new()}}pub fn step(&mut self,p:&[Value]){self.step+=1;let b1c=1.-self.b1.powi(self.step as i32);let b2c=1.-self.b2.powi(self.step as i32);for x in p{let id=std::rc::Rc::as_ptr(&x.0)as usize;let g=x.grad();let d=x.data();let mm=self.m.entry(id).or_insert_with(||vec![0.;d.len()]);let vv=self.v.entry(id).or_insert_with(||vec![0.;d.len()]);let mut nd=d.clone();for i in 0..d.len(){mm[i]=self.b1*mm[i]+(1.-self.b1)*g[i];vv[i]=self.b2*vv[i]+(1.-self.b2)*g[i]*g[i];let mh=mm[i]/b1c;let vh=vv[i]/b2c;nd[i]*=1.-self.lr*self.wd;nd[i]-=self.lr*mh/(vh.sqrt()+self.eps);}x.set_data(nd);x.zero_grad();}}}
+use crate::autograd::Value;use std::collections::HashMap;
+pub struct AdamW{t:usize,lr:f32,m:HashMap<usize,Vec<f32>>,v:HashMap<usize,Vec<f32>>}
+impl AdamW{pub fn new(lr:f32)->Self{Self{t:0,lr,m:HashMap::new(),v:HashMap::new()}}pub fn step(&mut self,ps:&[Value]){self.t+=1;let b1=.9f32;let b2=.999f32;let eps=1e-8f32;let wd=.01f32;let c1=1.-b1.powi(self.t as i32);let c2=1.-b2.powi(self.t as i32);for p in ps{let id=p.id();let d=p.data();let g=p.grad();let mm=self.m.entry(id).or_insert_with(||vec![0.;d.len()]);let vv=self.v.entry(id).or_insert_with(||vec![0.;d.len()]);let mut o=d.clone();for i in 0..d.len(){mm[i]=b1*mm[i]+(1.-b1)*g[i];vv[i]=b2*vv[i]+(1.-b2)*g[i]*g[i];o[i]*=1.-self.lr*wd;o[i]-=self.lr*(mm[i]/c1)/(vv[i]/c2).sqrt().max(eps);}p.set_data(o);p.zero_grad();}}}
