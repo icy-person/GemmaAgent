@@ -33,7 +33,7 @@
 - SwiGLU feed-forward
 - gradient accumulation با GradientsAccumulator
 - KV-cache واقعی برای prefill و incremental decoding
-- نرمال‌سازی اصلاح‌شدهٔ sampled CPU loss، כך שהloss دقیقاً بر تعداد مثال‌های واقعاً مصرف‌شده تقسیم می‌شود
+- نرمال‌سازی اصلاح‌شدهٔ sampled CPU loss، طوری که loss دقیقاً بر تعداد مثال‌های واقعاً مصرف‌شده تقسیم می‌شود
 
 ## پروفایل‌ها
 
