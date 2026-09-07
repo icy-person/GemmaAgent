@@ -5,20 +5,22 @@
 ## هستهٔ فعلی
 
 - reverse-mode Autograd با `matmul`, `transpose`, `softmax`, `log`, `gather`, row-gather و slicing
+- RMSNorm پارامتر-free با backward اختصاصی
 - گرادیان‌گیری برای SiLU و concatهای چندسطره
 - causal multi-head self-attention با 8 head در پروفایل هدف
-- decoder block با residual و feed-forward
+- decoder block با pre-norm، residual و feed-forward
 - SiLU در FFN
 - embedding مشترک ورودی/خروجی به‌صورت یک ماتریس واحد
 - positional encoding سینوسی بدون پارامتر اضافی
 - tokenizer بایتی با BOS/EOS
 - next-token cross-entropy
 - آموزش چندهدفهٔ causal از چند موقعیت داخل هر context window
-- AdamW با weight decay و bias correction
+- AdamW با weight decay، bias correction و global gradient clipping
 - حلقهٔ آموزش واقعی CPU
 - آموزش از corpus داخلی یا فایل متن UTF-8 با `--data`
 - gradient accumulation قابل تنظیم برای batch مؤثر بزرگ‌تر
 - تعداد targetهای هر window با `--targets-per-step`
+- نرخ یادگیری قابل تنظیم با `--lr`
 - checkpoint باینری shape-safe و corruption-aware
 - checkpoint دوره‌ای در طول آموزش
 - runtime مستقل و مستقیم CPU برای inference
@@ -68,24 +70,36 @@ cargo test --all-targets --all-features
 cargo run --release -- train 300
 ```
 
-آموزش از فایل متن UTF-8:
+آموزش پیشنهادی از فایل متن UTF-8:
 
 ```bash
-cargo run --release -- train 5000 gemma-agent.ckpt --data ./train.txt --grad-accum 8 --checkpoint-every 250 --targets-per-step 8
+cargo run --release -- train 5000 gemma-agent.ckpt \
+  --data ./train.txt \
+  --grad-accum 8 \
+  --targets-per-step 32 \
+  --lr 0.001 \
+  --checkpoint-every 250
 ```
 
-فایل با tokenizer بایتی فعلی به BOS/EOS + byte IDs تبدیل می‌شود. در هر window چند موقعیت causal به‌صورت هم‌زمان supervised می‌شوند و target خارج از انتهای window نیز حفظ می‌شود. این باعث می‌شود آموزش فقط به آخرین byte هر پنجره وابسته نباشد.
+فایل با tokenizer بایتی فعلی به BOS/EOS + byte IDs تبدیل می‌شود. در هر window چند موقعیت causal به‌صورت هم‌زمان supervised می‌شوند و target خارج از انتهای window نیز حفظ می‌شود.
 
-برای batch مؤثر بزرگ‌تر و checkpoint دوره‌ای:
+برای دادهٔ خیلی کوچک و تست overfit، می‌توان targetها را متراکم‌تر کرد:
 
 ```bash
-cargo run --release -- train 10000 gemma-agent.ckpt --grad-accum 8 --checkpoint-every 100 --targets-per-step 8
+cargo run --release -- train 10000 gemma-agent.ckpt \
+  --data ./train.txt \
+  --grad-accum 4 \
+  --targets-per-step 64 \
+  --lr 0.001 \
+  --checkpoint-every 250
 ```
 
 آموزش پروفایل هدف:
 
 ```bash
-cargo run --release -- train 300 gemma-agent-target.ckpt --target --grad-accum 4 --checkpoint-every 25 --targets-per-step 4
+cargo run --release -- train 300 gemma-agent-target.ckpt \
+  --target --grad-accum 4 --targets-per-step 4 \
+  --lr 0.0005 --checkpoint-every 25
 ```
 
 > هشدار: kernelهای آموزشی فعلی عمداً scalar و CPU-only هستند. بنابراین پروفایل ۱۹ میلیون پارامتری از نظر زمانی آموزشی مناسب توسعهٔ سریع نیست. هدف این نسخه، تثبیت correctness و architecture است.
@@ -106,17 +120,11 @@ Sampling:
 cargo run --release -- infer gemma-agent.ckpt "Rust is" --temperature 0.8 --top-k 40 --tokens 128
 ```
 
-برای پروفایل هدف باید همان فلگ `--target` را در inference هم بدهید:
+برای پروفایل هدف باید همان فلگ `--target` را در inference هم بدهید.
 
-```bash
-cargo run --release -- infer gemma-agent-target.ckpt "Rust is" --target --temperature 0.8 --top-k 40 --tokens 128
-```
-
-`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--checkpoint-every 0` یا حذف این گزینه، checkpoint دوره‌ای را غیرفعال می‌کند. `--grad-accum 1` یعنی یک update برای هر window آموزشی. `--targets-per-step 8` یعنی هشت موقعیت داخل window به‌علاوهٔ target بلافاصله بعد از window در loss وارد می‌شوند.
+`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--grad-accum 1` یعنی یک update برای هر window آموزشی. `--targets-per-step 32` یعنی ۳۲ موقعیت داخل window به‌علاوهٔ target بلافاصله بعد از window در loss وارد می‌شوند.
 
 ## Benchmark
-
-برای سنجش runtime مستقیم روی CPU:
 
 ```bash
 cargo run --release -- bench
@@ -124,10 +132,8 @@ cargo run --release -- bench --prompt-tokens 128 --tokens 64
 cargo run --release -- bench --target --prompt-tokens 128 --tokens 64
 ```
 
-خروجی، زمان و token/s برای prefill و incremental decode را جداگانه گزارش می‌کند. این benchmark با وزن‌های deterministic اجرا می‌شود و به checkpoint نیاز ندارد.
+خروجی، زمان و token/s برای prefill و incremental decode را جداگانه گزارش می‌کند.
 
 ## وضعیت مهندسی
 
-هستهٔ مدل و runtime مستقیم اکنون قابل تست و قابل بازتولید هستند. inference از graph autograd جدا شده و KV cache دارد، و training supervision از یک target در هر window به چندین target causal ارتقا یافته است. runtime هنوز production-grade نیست. گام‌های بعدی عبارت‌اند از tokenizer subword/BPE، tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، RMSNorm، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
-
-CI فعلی compilation/lint و regression tests را روی Rust stable اجرا می‌کند.
+هستهٔ مدل و runtime مستقیم قابل تست و بازتولید هستند. training اکنون pre-norm RMSNorm، supervision چندهدفه و gradient clipping دارد. tokenizer هنوز byte-level است و runtime هنوز production-grade نیست. گام‌های بعدی عبارت‌اند از tokenizer subword/BPE، tensorهای contiguous واقعی، SIMD/threading برای matmul، mixed precision، memory planning، batching واقعی در سطح tensor، rotary position embeddings، samplingهای پیشرفته‌تر و سپس backendهای Vulkan/CUDA/ROCm.
