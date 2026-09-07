@@ -15,7 +15,8 @@
 - next-token cross-entropy
 - AdamW با weight decay و bias correction
 - حلقهٔ آموزش واقعی CPU
-- checkpoint باینری shape-safe
+- checkpoint باینری shape-safe و corruption-aware
+- checkpoint دوره‌ای در طول آموزش
 - autoregressive inference با greedy و sampling
 - sampling با `temperature` و `top-k` بدون dependency جدید
 - initialization قطعی برای بازتولیدپذیری
@@ -60,10 +61,16 @@ cargo test --all-targets --all-features
 cargo run --release -- train 300
 ```
 
+برای اجرای طولانی، checkpoint دوره‌ای فعال کنید:
+
+```bash
+cargo run --release -- train 10000 gemma-agent.ckpt --checkpoint-every 100
+```
+
 آموزش پروفایل هدف:
 
 ```bash
-cargo run --release -- train 300 gemma-agent-target.ckpt --target
+cargo run --release -- train 300 gemma-agent-target.ckpt --target --checkpoint-every 25
 ```
 
 > هشدار: kernelهای فعلی عمداً scalar و CPU-only هستند. بنابراین پروفایل ۱۹ میلیون پارامتری از نظر زمانی آموزشی و برای توسعهٔ سریع مناسب نیست. هدف این نسخه، تثبیت correctness و architecture است.
@@ -86,7 +93,7 @@ cargo run --release -- infer gemma-agent.ckpt "Rust is" --temperature 0.8 --top-
 cargo run --release -- infer gemma-agent-target.ckpt "Rust is" --target --temperature 0.8 --top-k 40 --tokens 128
 ```
 
-`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است.
+`--temperature 0` یا مقدار بسیار نزدیک به صفر، greedy decoding را فعال می‌کند. `--top-k 0` یعنی محدودسازی top-k غیرفعال است. `--checkpoint-every 0` یا حذف این گزینه، checkpoint دوره‌ای را غیرفعال می‌کند.
 
 ## وضعیت مهندسی
 
