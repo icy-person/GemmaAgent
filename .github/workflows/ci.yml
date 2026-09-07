@@ -14,3 +14,4 @@ jobs:
           components: clippy
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features
+      - run: cargo check --all-targets --features amd-vulkan
