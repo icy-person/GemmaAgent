@@ -12,7 +12,7 @@
 | `amd-vulkan` | لپ‌تاپ/دسکتاپ Radeon یا GPU سازگار | Burn + WGPU + Vulkan | آموزش + inference + KV-cache |
 | `android-vulkan` | Android arm64 با GPU Vulkan | Burn + WGPU + Vulkan | inference روی دستگاه |
 
-فقط یکی از این سه feature را برای هر build فعال کن. برای دو backend GPU از `--no-default-features` استفاده می‌شود تا CPU backend ناخواسته نیز وارد build نشود. مسیر Android و AMD هستهٔ Transformer، tokenizer و فرمت checkpoint مشترک دارند.
+فقط یکی از این سه feature را برای هر build فعال کن. برای دو backend GPU از `--no-default-features` استفاده می‌شود تا CPU backend ناخواسته نیز وارد build نشود. `build.rs` در زمان build این قانون را enforce می‌کند و فعال‌شدن صفر یا چند backend را خطا می‌دهد. مسیر Android و AMD هستهٔ Transformer، tokenizer و فرمت checkpoint مشترک دارند.
 
 ## هستهٔ فعلی
 
@@ -20,6 +20,7 @@
 - causal multi-head self-attention و FFN با SiLU در مسیر CPU
 - tokenizer بایتی برای profile کوچک و tokenizer subword آموخته‌شده برای profileهای بزرگ
 - byte fallback و ذخیره/بازیابی tokenizer
+- next-token cross-entropy با نمونه‌گیری کنترل‌شده از موقعیت‌های context در CPU
 - next-token cross-entropy روی تمام موقعیت‌های causal در backend GPU
 - AdamW، gradient clipping و warmup/cosine schedule
 - train/validation split و validation perplexity
@@ -32,6 +33,7 @@
 - SwiGLU feed-forward
 - gradient accumulation با GradientsAccumulator
 - KV-cache واقعی برای prefill و incremental decoding
+- نرمال‌سازی اصلاح‌شدهٔ sampled CPU loss، כך שהloss دقیقاً بر تعداد مثال‌های واقعاً مصرف‌شده تقسیم می‌شود
 
 ## پروفایل‌ها
 
@@ -63,7 +65,7 @@ cargo run --release --no-default-features --features runner-cpu --bin cpu-train 
   --checkpoint-every 25
 ```
 
-checkpoint کامل شامل وزن، optimizer state، RNG و tokenizer است.
+checkpoint کامل شامل وزن، optimizer state، RNG و tokenizer است. trainer از checkpoint قبلی resume می‌کند و loss sampled را با تعداد واقعی targetها نرمال می‌کند.
 
 ## Laptop / AMD Vulkan
 
@@ -96,7 +98,7 @@ cargo run --release --no-default-features --features amd-vulkan --bin amd-train 
   --gpu 0
 ```
 
-برای انتخاب خودکار GPU از `--gpu-kind best` استفاده می‌شود. `--gpu-util 50` duty-cycle تقریبی workload را محدود می‌کند.
+برای انتخاب خودکار GPU از `--gpu-kind best` استفاده می‌شود. `--gpu-util 50` duty-cycle تقریبی workload را محدود می‌کند؛ این مقدار محدودکنندهٔ سخت‌افزاری driver نیست.
 
 benchmark:
 
@@ -108,6 +110,8 @@ cargo run --release --no-default-features --features amd-vulkan --bin amd-bench 
   --gpu-kind integrated \
   --gpu 0
 ```
+
+برای throughput بالاتر، افزایش `batch-size` و سپس استفاده از `grad-accum` روی دستگاه دارای حافظهٔ کافی مناسب‌تر از syncهای زیاد با batch=1 است.
 
 ## Android / Vulkan
 
@@ -132,7 +136,7 @@ cargo ndk -t arm64-v8a build --release --no-default-features --features android-
   --top-k 40
 ```
 
-در CI نیز target اندروید به‌صورت مستقل compile-check می‌شود.
+این backend در CI به‌صورت مستقل برای `aarch64-linux-android` compile-check می‌شود؛ اجرای Vulkan روی یک گوشی واقعی باید روی همان دستگاه benchmark شود.
 
 ## معماری مشترک Vulkan
 
@@ -162,7 +166,7 @@ Android:
 cargo check --target aarch64-linux-android --no-default-features --features android-vulkan --bin android-infer
 ```
 
-هر build باید با یک backend مشخص ساخته شود؛ این کار dependency و compile surface را جدا نگه می‌دارد.
+هر build باید با یک backend مشخص ساخته شود. این قید هم در مستندات و هم در `build.rs` enforce شده است.
 
 ## سرعت و حافظه
 
@@ -170,7 +174,7 @@ cargo check --target aarch64-linux-android --no-default-features --features andr
 
 ## کیفیت مدل
 
-فناوری backend به‌تنهایی مدل را باهوش نمی‌کند. کیفیت بیشتر به corpus تمیز و بزرگ، tokenizer مناسب، تعداد token کافی، validation صحیح و آموزش طولانی وابسته است. رسیدن به validation loss زیر 1 روی corpus کوچک ممکن است صرفاً نشانهٔ memorization باشد.
+فناوری backend به‌تنهایی مدل را باهوش نمی‌کند. کیفیت بیشتر به corpus تمیز و بزرگ، tokenizer مناسب، تعداد token کافی، validation صحیح و آموزش طولانی وابسته است. رسیدن به validation loss زیر 1 روی corpus کوچک ممکن است صرفاً نشانهٔ memorization باشد و نباید به‌عنوان تضمین توانایی عمومی مدل تفسیر شود.
 
 ## CI
 
@@ -180,8 +184,8 @@ CI سه مسیر را مستقل بررسی می‌کند:
 2. `Laptop / AMD Vulkan backend`
 3. `Android / arm64 Vulkan backend`
 
-GitHub-hosted runner سخت‌افزار Radeon یا GPU موبایل کاربر را شبیه‌سازی نمی‌کند؛ بنابراین benchmark نهایی باید روی دستگاه واقعی انجام شود.
+همچنین CI یک build با دو backend هم‌زمان را عمداً امتحان می‌کند و انتظار دارد `build.rs` آن را رد کند. GitHub-hosted runner سخت‌افزار Radeon یا GPU موبایل کاربر را شبیه‌سازی نمی‌کند؛ بنابراین benchmark نهایی باید روی دستگاه واقعی انجام شود.
 
 ## وضعیت فعلی
 
-پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند و هر دو دارای **RoPE + native SDPA + SwiGLU + KV-cache** هستند.
+پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. هر build فقط یک backend runtime دارد، backendهای GPU بر پایهٔ Vulkan هستند، GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند و هر دو دارای **RoPE + native SDPA + SwiGLU + KV-cache** هستند.
