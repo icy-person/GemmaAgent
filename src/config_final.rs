@@ -1,2 +1,0 @@
-#[derive(Clone,Copy,Debug)]pub struct Config{pub vocab:usize,pub context:usize,pub d_model:usize,pub layers:usize,pub heads:usize,pub ffn:usize}
-impl Config{pub fn debug()->Self{Self{vocab:258,context:128,d_model:64,layers:2,heads:4,ffn:128}}pub fn target()->Self{Self{vocab:16384,context:1024,d_model:416,layers:6,heads:8,ffn:1664}}pub fn head_dim(&self)->usize{assert_eq!(self.d_model%self.heads,0);self.d_model/self.heads}pub fn params(&self)->usize{let e=self.vocab*self.d_model;let per=4*self.d_model*self.d_model+2*self.d_model*self.ffn;e+self.layers*per}}
