@@ -189,6 +189,7 @@ impl<B: Backend> AmdModel<B> {
     }
 }
 
+#[allow(deprecated)]
 fn make_device(gpu_index:usize,gpu_kind:&str)->WgpuDevice{
     let device=match gpu_kind{"integrated"=>WgpuDevice::IntegratedGpu(gpu_index),"discrete"=>WgpuDevice::DiscreteGpu(gpu_index),"best"=>WgpuDevice::BestAvailable,other=>panic!("invalid --gpu-kind '{other}', expected integrated, discrete, or best")};
     init_setup::<Vulkan>(&device,Default::default()); device
@@ -220,7 +221,7 @@ fn save_checkpoint(model:&AmdModel<AmdBackend>,optimizer:&AmdOptimizer,checkpoin
 
 fn load_optimizer(optimizer:AmdOptimizer,checkpoint:&str)->AmdOptimizer{let path=optimizer_path(checkpoint);if !Path::new(&path).exists(){return optimizer;}optimizer.load(path).unwrap_or_else(|e|panic!("failed to load optimizer checkpoint: {e}"))}
 
-fn evaluate(model:&AmdModel<AmdBase>,encoded:&[usize],context:usize,batches:usize,device:&<AmdBase as Backend>::Device)->f64{let loss_fn=CrossEntropyLossConfig::new().init(device);let mut total=0.0;let batches=batches.max(1);for batch in 0..batches{let(xs,ys)=make_eval_batch(encoded,context,batch,device);let logits=model.forward_logits(xs);total+=loss_fn.forward(logits.reshape([context,model.vocab]),ys.reshape([context])).into_scalar() as f64;}total/batches as f64}
+fn evaluate(model:&AmdModel<AmdBase>,encoded:&[usize],context:usize,batches:usize,device:&<AmdBase as Backend>::Device)->f64{let loss_fn=CrossEntropyLossConfig::new().init(device);let mut total=0.0;let batches=batches.max(1);for batch in 0..batches{let(xs,ys)=make_eval_batch(encoded,context,batch,device);let logits=model.forward_logits(xs);total+=loss_fn.forward(logits.reshape([context,model.vocab]),ys.reshape([context])).into_scalar()as f64;}total/batches as f64}
 
 pub fn train(cfg:Config,steps:usize,checkpoint:&str,best_checkpoint:&str,data_path:&str,tokenizer_path:&str,resume:Option<&str>,batch_size:usize,grad_accum:usize,lr:f64,checkpoint_every:usize,eval_every:usize,gpu_index:usize,gpu_kind:&str){
     cfg.validate();assert!(steps>0&&batch_size>0&&grad_accum>0&&lr.is_finite()&&lr>0.0);let device=make_device(gpu_index,gpu_kind);let model_cfg=AmdModelConfig::new(cfg);let mut model:AmdModel<AmdBackend>=model_cfg.init(&device);let mut optimizer=make_optimizer();let mut start_update=0usize;let mut best_val=f64::INFINITY;let mut rng_state=0xD1B5_4A32_9F6C_71E3u64;let recorder=BinFileRecorder::<FullPrecisionSettings>::default();
