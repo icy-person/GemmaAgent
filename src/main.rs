@@ -1,8 +1,10 @@
+mod autograd;
 mod config;
 mod model;
 mod tensor;
 mod tokenizer;
 
+use autograd::Value;
 use config::Config;
 use model::Model;
 use tokenizer::ByteTokenizer;
@@ -29,5 +31,10 @@ fn main() {
     let logits = model.forward(&tokens);
     let next = argmax(&logits);
     println!("next token id: {next}");
-    println!("note: weights are randomly initialized; training comes next.");
+
+    let a = Value::leaf(1, 2, vec![2.0, 3.0]);
+    let b = Value::leaf(2, 1, vec![5.0, 7.0]);
+    let y = a.matmul(&b);
+    y.backward();
+    println!("autograd check: y={:?}, da={:?}, db={:?}", y.data(), a.grad(), b.grad());
 }
