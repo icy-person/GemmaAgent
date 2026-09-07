@@ -1,12 +1,17 @@
+#[cfg(feature = "cuda")]
 #[path = "../config.rs"]
 mod config;
+#[cfg(feature = "cuda")]
 #[path = "../tokenizer.rs"]
 mod tokenizer;
+#[cfg(feature = "cuda")]
 #[path = "../gpu.rs"]
 mod gpu;
 
+#[cfg(feature = "cuda")]
 use std::process::ExitCode;
 
+#[cfg(feature = "cuda")]
 fn parse_usize(args: &[String], name: &str, default: usize) -> usize {
     args.iter()
         .position(|arg| arg == name)
@@ -15,6 +20,7 @@ fn parse_usize(args: &[String], name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+#[cfg(feature = "cuda")]
 fn parse_f64(args: &[String], name: &str, default: f64) -> f64 {
     args.iter()
         .position(|arg| arg == name)
@@ -23,6 +29,7 @@ fn parse_f64(args: &[String], name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+#[cfg(feature = "cuda")]
 fn parse_string(args: &[String], name: &str, default: &str) -> String {
     args.iter()
         .position(|arg| arg == name)
@@ -31,12 +38,14 @@ fn parse_string(args: &[String], name: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_owned())
 }
 
+#[cfg(feature = "cuda")]
 fn print_usage() {
     println!(
         "GemmaAgent CUDA trainer\n\nUsage:\n  cargo run --release --features cuda --bin gpu-train -- --steps 5000 --data ./train.txt --checkpoint gemma-agent-gpu.safetensors\n\nOptions:\n  --steps N              optimization steps (default 5000)\n  --data FILE            UTF-8 training corpus (default ./train.txt)\n  --checkpoint FILE      safetensors checkpoint path\n  --batch-size N         windows per GPU batch (default 8)\n  --lr X                 AdamW learning rate (default 0.0003)\n  --checkpoint-every N   save every N steps (default 250)\n  --gpu N                CUDA device ordinal (default 0)\n\nThis trainer uses dense causal next-token loss over every position in each context window.\n"
     );
 }
 
+#[cfg(feature = "cuda")]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -68,4 +77,10 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+#[cfg(not(feature = "cuda"))]
+fn main() {
+    eprintln!("gpu-train requires the `cuda` feature.");
+    eprintln!("Use: cargo run --release --features cuda --bin gpu-train -- --help");
 }
