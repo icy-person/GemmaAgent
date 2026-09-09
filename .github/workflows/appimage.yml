@@ -55,15 +55,22 @@ jobs:
           cp target/release/amd-train AppDir/usr/bin/amd-train
           chmod +x AppDir/usr/bin/gemma-ui AppDir/usr/bin/cpu-train AppDir/usr/bin/amd-train
 
+          cp AppRun AppDir/AppRun
+          chmod +x AppDir/AppRun
+
           cp packaging/gemma-agent.desktop AppDir/usr/share/applications/gemma-agent.desktop
           cp packaging/gemma-agent.svg AppDir/usr/share/icons/hicolor/scalable/apps/gemma-agent.svg
           cp packaging/gemma-agent.desktop AppDir/gemma-agent.desktop
           cp packaging/gemma-agent.svg AppDir/gemma-agent.svg
 
-      - name: Verify trainer binaries
+      - name: Verify AppDir
         shell: bash
         run: |
           set -euo pipefail
+          test -f AppDir/AppRun
+          test -x AppDir/AppRun
+          test -f AppDir/gemma-agent.desktop
+          test -f AppDir/gemma-agent.svg
           for binary in gemma-ui cpu-train amd-train; do
             test -f "AppDir/usr/bin/$binary"
             test -x "AppDir/usr/bin/$binary"
