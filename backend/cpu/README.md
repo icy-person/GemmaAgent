@@ -2,8 +2,11 @@
 
 Portable scalar Rust/autograd training backend.
 
-- `autograd.rs`: reverse-mode autodiff engine
-- `model.rs`: decoder-only causal language model
+- `autograd.rs`: reverse-mode autodiff engine (matmul parallelizes across
+  threads for the dominant 1xN row-vector shape; std only, no new deps)
+- `model.rs`: decoder-only causal language model with RoPE on Q/K, RMSNorm,
+  and a SiLU-gated FFN — architecturally aligned with the AMD/Android Vulkan
+  backend
 - `optim.rs`: AdamW with gradient clipping
 - `checkpoint.rs`: model/optimizer/RNG resume state
 - `config.rs` and `tokenizer.rs`: adapters to `src/core`
