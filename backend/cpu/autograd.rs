@@ -36,12 +36,16 @@ impl Value {
         Self(Rc::new(RefCell::new(Node { r, c, g: vec![0.0; d.len()], d, op })))
     }
     pub fn leaf(r: usize, c: usize, d: Vec<f32>) -> Self { Self::mk(r, c, d, Op::Leaf) }
+    /// Uniform init in `[-1/sqrt(fan_in), 1/sqrt(fan_in)]` (fan_in = number of columns), a
+    /// LeCun-style bound. Unlike a fixed range, this keeps activation variance roughly constant
+    /// as layer width (d_model, ffn) grows instead of shrinking relative to fan-in.
     pub fn parameter(r: usize, c: usize, seed: &mut u64) -> Self {
+        let bound = (1.0 / c.max(1) as f32).sqrt();
         let mut d = Vec::with_capacity(r * c);
         for _ in 0..r * c {
             *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             let u = ((*seed >> 32) as u32) as f32 / u32::MAX as f32;
-            d.push((u - 0.5) * 0.05);
+            d.push((u * 2.0 - 1.0) * bound);
         }
         Self::leaf(r, c, d)
     }
@@ -57,8 +61,8 @@ impl Value {
     pub fn div_scalar(&self, scalar: f32) -> Self { assert!(scalar.is_finite() && scalar != 0.0); self.scalar_mul(1.0/scalar) }
     pub fn matmul(&self, rhs: &Self) -> Self {
         let (ar,ac)=self.shape(); let (br,bc)=rhs.shape(); assert_eq!(ac,br,"matmul shape mismatch: {ar}x{ac} · {br}x{bc}");
-        let x=self.data(); let y=rhs.data(); let mut out=vec![0.0;ar*bc];
-        for i in 0..ar { for k in 0..ac { let a=x[i*ac+k]; if a==0.0 {continue;} for j in 0..bc {out[i*bc+j]+=a*y[k*bc+j];}}}
+        let x=self.data(); let y=rhs.data();
+        let out = matmul_raw(&x, &y, ar, ac, bc);
         Self::mk(ar,bc,out,Op::MatMul(self.clone(),rhs.clone()))
     }
     pub fn transpose(&self) -> Self { let (rows,cols)=self.shape(); let x=self.data(); let mut out=vec![0.0;rows*cols]; for i in 0..rows {for j in 0..cols {out[j*rows+i]=x[i*cols+j];}} Self::mk(cols,rows,out,Op::Transpose(self.clone())) }
@@ -99,6 +103,50 @@ fn back(value:&Value){ let grad=value.grad(); match value.0.borrow().op.clone(){
     Op::RowGather(a,row)=>{let cols=a.shape().1;let mut ga=vec![0.0;a.data().len()];ga[row*cols..(row+1)*cols].copy_from_slice(&grad);accumulate(&a,&ga);}
 }}
 
+/// Multiply-add count above which the dominant `1 x ac` * `ac x bc` shape in this model (every
+/// Q/K/V/O/up/down/logits projection is a single-token row vector times a weight matrix) is
+/// split across threads. Below this, or on a single-core host, the thread-spawn overhead loses
+/// to the plain sequential loop.
+const PARALLEL_MATMUL_THRESHOLD: usize = 4096;
+
+fn matmul_raw(x: &[f32], y: &[f32], ar: usize, ac: usize, bc: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; ar * bc];
+    if ar == 1 {
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        if bc > 1 && threads > 1 && ac * bc >= PARALLEL_MATMUL_THRESHOLD {
+            let chunk = bc.div_ceil(threads.min(bc));
+            std::thread::scope(|scope| {
+                for (idx, out_chunk) in out.chunks_mut(chunk).enumerate() {
+                    let col_start = idx * chunk;
+                    scope.spawn(move || vec_matmul_cols(x, y, ac, bc, col_start, out_chunk));
+                }
+            });
+        } else {
+            vec_matmul_cols(x, y, ac, bc, 0, &mut out);
+        }
+        return out;
+    }
+    for i in 0..ar {
+        for k in 0..ac {
+            let a = x[i * ac + k];
+            if a == 0.0 { continue; }
+            for j in 0..bc { out[i * bc + j] += a * y[k * bc + j]; }
+        }
+    }
+    out
+}
+
+/// Computes the `[col_start, col_start + out.len())` slice of `x (1 x ac) * y (ac x bc)`.
+fn vec_matmul_cols(x: &[f32], y: &[f32], ac: usize, bc: usize, col_start: usize, out: &mut [f32]) {
+    let width = out.len();
+    for k in 0..ac {
+        let a = x[k];
+        if a == 0.0 { continue; }
+        let y_row = &y[k * bc + col_start..k * bc + col_start + width];
+        for (o, yv) in out.iter_mut().zip(y_row) { *o += a * yv; }
+    }
+}
+
 #[cfg(test)]
 mod tests{
  use super::*;
@@ -111,4 +159,19 @@ mod tests{
  #[test]fn silu_backward(){let x=Value::leaf(1,1,vec![0.7]);let y=x.silu();y.backward();let s=1./(1.+(-0.7_f32).exp());let expected=s*(1.+0.7*(1.-s));assert!((x.grad()[0]-expected).abs()<1e-6);}
  #[test]fn rms_norm_backward_finite_difference(){let x=Value::leaf(1,3,vec![0.4,-0.7,1.2]);let y=x.rms_norm(1e-5);let loss=y.mul(&Value::leaf(1,3,vec![0.3,-0.2,0.5]));loss.backward();let analytic=x.grad();let base=x.data();let eps=1e-3_f32;for i in 0..3{let mut plus=base.clone();plus[i]+=eps;let mut minus=base.clone();minus[i]-=eps;let lp=Value::leaf(1,3,plus).rms_norm(1e-5).mul(&Value::leaf(1,3,vec![0.3,-0.2,0.5])).data().iter().sum::<f32>();let lm=Value::leaf(1,3,minus).rms_norm(1e-5).mul(&Value::leaf(1,3,vec![0.3,-0.2,0.5])).data().iter().sum::<f32>();let numeric=(lp-lm)/(2.*eps);assert!((analytic[i]-numeric).abs()<2e-3,"i={i} analytic={} numeric={}",analytic[i],numeric);}}
  #[test]fn log_clamp_has_zero_gradient_below_floor(){let x=Value::leaf(1,1,vec![1e-25]);let y=x.log();y.backward();assert_eq!(x.grad(),vec![0.]);}
+ #[test]fn parameter_init_scales_with_fan_in(){
+    let mut seed_small=1; let small_fan_in=Value::parameter(50,4,&mut seed_small);
+    let mut seed_large=1; let large_fan_in=Value::parameter(50,400,&mut seed_large);
+    let max_abs=|v:&Value|v.data().iter().cloned().fold(0.0f32,|acc,x|acc.max(x.abs()));
+    assert!(max_abs(&large_fan_in)<max_abs(&small_fan_in),"wider fan-in should yield smaller-magnitude weights");
+ }
+ #[test]fn matmul_parallel_path_matches_manual_dot_product(){
+    let ac=130usize; let bc=130usize; // ac*bc is well above PARALLEL_MATMUL_THRESHOLD
+    let mut seed=9; let x=Value::parameter(1,ac,&mut seed); let y=Value::parameter(ac,bc,&mut seed);
+    let result=x.matmul(&y);
+    let xd=x.data(); let yd=y.data();
+    let mut expected=vec![0.0f32;bc];
+    for k in 0..ac { for j in 0..bc { expected[j]+=xd[k]*yd[k*bc+j]; } }
+    for(a,b) in result.data().iter().zip(expected.iter()) { assert!((a-b).abs()<1e-3,"parallel matmul diverged from manual dot product: {a} vs {b}"); }
+ }
 }
