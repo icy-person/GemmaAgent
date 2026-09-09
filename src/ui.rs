@@ -98,7 +98,7 @@ impl GemmaUi {
         }
 
         // Finally allow an installed trainer available through PATH.
-        if let Ok(path_var) = std::env::var_os("PATH") {
+        if let Some(path_var) = std::env::var_os("PATH") {
             for dir in std::env::split_paths(&path_var) {
                 let path = dir.join(name);
                 if path.is_file() {
