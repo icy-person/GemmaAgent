@@ -22,6 +22,16 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Install appimagetool
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o appimagetool.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          sudo mv appimagetool.AppImage /usr/local/bin/appimagetool
+          appimagetool --version || true
+
       - name: Build GemmaAgent UI and CPU trainer
         run: |
           set -euo pipefail
@@ -45,6 +55,11 @@ jobs:
           cp target/release/amd-train AppDir/usr/bin/amd-train
           chmod +x AppDir/usr/bin/gemma-ui AppDir/usr/bin/cpu-train AppDir/usr/bin/amd-train
 
+          cp packaging/gemma-agent.desktop AppDir/usr/share/applications/gemma-agent.desktop
+          cp packaging/gemma-agent.svg AppDir/usr/share/icons/hicolor/scalable/apps/gemma-agent.svg
+          cp packaging/gemma-agent.desktop AppDir/gemma-agent.desktop
+          cp packaging/gemma-agent.svg AppDir/gemma-agent.svg
+
       - name: Verify trainer binaries
         shell: bash
         run: |
@@ -59,25 +74,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f packaging/appimagetool-x86_64.AppImage ]; then
-            chmod +x packaging/appimagetool-x86_64.AppImage
-            packaging/appimagetool-x86_64.AppImage AppDir dist/GemmaAgent-x86_64.AppImage
-          elif command -v appimagetool >/dev/null 2>&1; then
-            appimagetool AppDir dist/GemmaAgent-x86_64.AppImage
-          else
-            echo "appimagetool not found"
-            exit 1
-          fi
+          appimagetool AppDir dist/GemmaAgent-x86_64.AppImage
 
       - name: Verify packaged AppImage
         shell: bash
         run: |
           set -euo pipefail
           test -f dist/GemmaAgent-x86_64.AppImage
-          chmod +x dist/GemmaAgent-x86_64.AppImage
-          test -f AppDir/usr/bin/gemma-ui
-          test -f AppDir/usr/bin/cpu-train
-          test -f AppDir/usr/bin/amd-train
+          test -x dist/GemmaAgent-x86_64.AppImage
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
