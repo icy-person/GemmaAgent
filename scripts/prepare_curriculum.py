@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Build a deterministic multi-domain curriculum without giant repeated templates."""
 from __future__ import annotations
+import argparse
 import random
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / "data"
-CURRICULUM = DATA / "curriculum"
 SEED = 20260907
 
 def read(path: Path) -> str:
@@ -17,18 +16,18 @@ def write(path: Path, text: str) -> None:
     path.write_text(text.strip() + "\n", encoding="utf-8")
     print(f"{path}: {len(text):,} chars")
 
-def collect_code() -> str:
+def collect_code(root: Path) -> str:
     parts: list[str] = []
     for pattern in ("*.rs", "*.toml", "*.md", "*.yml", "*.yaml", "*.py"):
-        for path in sorted(ROOT.rglob(pattern)):
-            if any(part in {"target", ".git", "data"} for part in path.parts):
+        for path in sorted(root.rglob(pattern)):
+            if any(part in {"target", ".git", "data", "curriculum"} for part in path.parts):
                 continue
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             if text.strip():
-                parts.append(f"\n\n### FILE: {path.relative_to(ROOT)}\n\n{text}")
+                parts.append(f"\n\n### FILE: {path.relative_to(root)}\n\n{text}")
     return "".join(parts)
 
 def make_math() -> str:
@@ -76,7 +75,7 @@ def sample_blocks(text: str, limit: int, rng: random.Random) -> list[str]:
         return blocks
     return rng.sample(blocks, limit)
 
-def mix(name: str, literature: str, code: str, math: str, reasoning: str, weights: tuple[float, float, float, float], seed: int) -> None:
+def mix(output_dir: Path, name: str, literature: str, code: str, math: str, reasoning: str, weights: tuple[float, float, float, float], seed: int) -> None:
     rng = random.Random(seed)
     pools = [sample_blocks(literature, 1800, rng), sample_blocks(code, 1000, rng), sample_blocks(math, 1600, rng), sample_blocks(reasoning, 1400, rng)]
     labels = ["LITERATURE", "CODE", "MATH", "REASONING"]
@@ -87,19 +86,26 @@ def mix(name: str, literature: str, code: str, math: str, reasoning: str, weight
         rng.shuffle(chosen)
         blocks.extend(f"### {label}\n{b}" for b in chosen[:count])
     rng.shuffle(blocks)
-    write(CURRICULUM / f"{name}.txt", "\n\n".join(blocks))
+    write(output_dir / f"{name}.txt", "\n\n".join(blocks))
 
 def main() -> None:
-    literature = read(DATA / "train.txt")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root-dir", type=Path, default=ROOT)
+    parser.add_argument("--output-dir", type=Path, default=None)
+    args = parser.parse_args()
+
+    data = args.root_dir / "data"
+    curriculum = args.output_dir or data / "curriculum"
+    literature = read(data / "train.txt")
     if not literature:
-        raise SystemExit("data/train.txt is missing; run prepare_real_corpus.py first")
-    code, math, reasoning = collect_code(), make_math(), make_reasoning()
-    write(CURRICULUM / "literature.txt", literature); write(CURRICULUM / "code.txt", code); write(CURRICULUM / "math.txt", math); write(CURRICULUM / "reasoning.txt", reasoning)
-    mix("01-literature", literature, code, math, reasoning, (0.75, 0.05, 0.10, 0.10), SEED + 1)
-    mix("02-code", literature, code, math, reasoning, (0.20, 0.60, 0.10, 0.10), SEED + 2)
-    mix("03-math", literature, code, math, reasoning, (0.20, 0.10, 0.60, 0.10), SEED + 3)
-    mix("04-reasoning", literature, code, math, reasoning, (0.25, 0.10, 0.20, 0.45), SEED + 4)
-    mix("05-balanced", literature, code, math, reasoning, (0.30, 0.20, 0.25, 0.25), SEED + 5)
+        raise SystemExit(f"{data / 'train.txt'} is missing; run prepare_real_corpus.py first")
+    code, math, reasoning = collect_code(args.root_dir), make_math(), make_reasoning()
+    write(curriculum / "literature.txt", literature); write(curriculum / "code.txt", code); write(curriculum / "math.txt", math); write(curriculum / "reasoning.txt", reasoning)
+    mix(curriculum, "01-literature", literature, code, math, reasoning, (0.75, 0.05, 0.10, 0.10), SEED + 1)
+    mix(curriculum, "02-code", literature, code, math, reasoning, (0.20, 0.60, 0.10, 0.10), SEED + 2)
+    mix(curriculum, "03-math", literature, code, math, reasoning, (0.20, 0.10, 0.60, 0.10), SEED + 3)
+    mix(curriculum, "04-reasoning", literature, code, math, reasoning, (0.25, 0.10, 0.20, 0.45), SEED + 4)
+    mix(curriculum, "05-balanced", literature, code, math, reasoning, (0.30, 0.20, 0.25, 0.25), SEED + 5)
     print("curriculum ready")
 
 if __name__ == "__main__":
