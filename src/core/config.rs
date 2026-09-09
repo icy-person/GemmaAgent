@@ -37,6 +37,7 @@ impl Config {
         assert!(self.context > 0, "context must be non-zero");
         assert!(self.d_model > 0 && self.layers > 0 && self.heads > 0 && self.ffn > 0);
         assert_eq!(self.d_model % self.heads, 0, "d_model must divide evenly across heads");
+        assert_eq!(self.head_dim() % 2, 0, "RoPE requires an even head dimension");
     }
 
     pub fn approx_parameter_memory_mb(&self) -> f32 {
@@ -60,5 +61,14 @@ mod tests {
         let c = Config::large(); c.validate();
         assert_eq!((c.context, c.heads, c.d_model, c.layers, c.ffn), (1024, 10, 640, 8, 2560));
         assert_eq!(c.params(), 49_807_360);
+    }
+
+    #[test]
+    fn validate_rejects_odd_head_dim() {
+        let c = Config { vocab: 258, context: 128, d_model: 96, layers: 1, heads: 5, ffn: 128 };
+        // 96 / 5 doesn't even divide evenly, so this must already fail on that check,
+        // not silently pass an odd head_dim into RoPE.
+        let result = std::panic::catch_unwind(|| c.validate());
+        assert!(result.is_err());
     }
 }
