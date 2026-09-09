@@ -31,8 +31,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y file patchelf desktop-file-utils libfuse2
 
-      - name: Build GemmaAgent UI
-        run: cargo build --release --bin gemma-ui
+      - name: Build GemmaAgent UI and trainers
+        run: |
+          set -euo pipefail
+          cargo build --release --bin gemma-ui
+          cargo build --release --bin cpu-train
+          cargo build --release --bin amd-train --features amd-vulkan
 
       - name: Prepare AppDir
         shell: bash
@@ -40,8 +44,15 @@ jobs:
           set -euo pipefail
           rm -rf AppDir dist
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps dist
+
+          # The UI discovers trainers beside its own executable. Keeping all
+          # three binaries in the same AppDir/usr/bin makes that work both
+          # inside the AppImage and after extraction.
           cp target/release/gemma-ui AppDir/usr/bin/gemma-ui
-          chmod +x AppDir/usr/bin/gemma-ui
+          cp target/release/cpu-train AppDir/usr/bin/cpu-train
+          cp target/release/amd-train AppDir/usr/bin/amd-train
+          chmod +x AppDir/usr/bin/gemma-ui AppDir/usr/bin/cpu-train AppDir/usr/bin/amd-train
+
           cp packaging/gemma-agent.desktop AppDir/usr/share/applications/gemma-agent.desktop
           cp packaging/gemma-agent.svg AppDir/usr/share/icons/hicolor/scalable/apps/gemma-agent.svg
           cp packaging/gemma-agent.desktop AppDir/gemma-agent.desktop
