@@ -14,8 +14,9 @@
 
 ## هستهٔ فعلی
 
-- reverse-mode Autograd در مسیر CPU
-- causal multi-head self-attention و FFN با SiLU در مسیر CPU
+- reverse-mode Autograd در مسیر CPU (matmul برای شکل غالب مدل — بردار ۱×N ضرب در ماتریس — بین چند thread موازی می‌شود)
+- causal multi-head self-attention با RoPE روی Q/K و FFN با SiLU در مسیر CPU — هم‌راستا با معماری backend GPU
+- مقداردهی اولیهٔ وزن‌ها متناسب با fan-in (LeCun-style) به‌جای بازهٔ ثابت
 - tokenizer بایتی برای profile کوچک و tokenizer subword آموخته‌شده برای profileهای بزرگ
 - byte fallback و ذخیره/بازیابی tokenizer
 - next-token cross-entropy با نمونه‌گیری بدون تکرار از موقعیت‌های context در CPU
@@ -68,7 +69,7 @@ cargo run --release --no-default-features --features runner-cpu --bin cpu-train 
 
 ## آموزش با اینترنت و corpus آنلاین
 
-Pipeline آموزشی یک مرحلهٔ آنلاین دارد که از **Wikimedia/Wikipedia** دادهٔ متنی می‌گیرد. این جمع‌آوری crawler آزاد نیست؛ دامنه و API مشخص است، درخواست‌ها rate-limited هستند، داده cache می‌شود و برای هر صفحه title، URL، revision id، hash و license داخل `data/online_manifest.json` ثبت می‌شود. برای درخواست‌های ماشینی به Wikimedia، User-Agent توصیفی و رعایت throttling ضروری است. urlراهنمای API Policy و User-Agent و TextExtractshttps://meta.wikimedia.org/wiki/API_Policy_Update_2024/en
+Pipeline آموزشی یک مرحلهٔ آنلاین دارد که از **Wikimedia/Wikipedia** دادهٔ متنی می‌گیرد. این جمع‌آوری crawler آزاد نیست؛ دامنه و API مشخص است، درخواست‌ها rate-limited هستند، داده cache می‌شود و برای هر صفحه title، URL، revision id، hash و license داخل `data/online_manifest.json` ثبت می‌شود. برای درخواست‌های ماشینی به Wikimedia، User-Agent توصیفی و رعایت throttling ضروری است. urlراهنمای API Policy و User-Agent و TextExtractshttps://meta.wikimedia.org/wiki/API_Policy_Update_2024/en
 
 اجرای محلی:
 
@@ -187,6 +188,8 @@ cargo ndk -t arm64-v8a build --release --no-default-features --features android-
 
 در inference، prompt یک‌بار prefill می‌شود و K/V هر لایه در KV-cache نگه‌داری می‌شود؛ tokenهای بعدی incremental پردازش می‌شوند.
 
+مسیر CPU از همین idea برای RoPE(Q,K) استفاده می‌کند (بدون fused QKV و بدون KV-cache، چون هدفش portability و correctness برای CI است نه throughput)، اما دیگر معماری متفاوتی نسبت به GPU ندارد.
+
 ## انتخاب backend
 
 Runner:
@@ -233,4 +236,4 @@ Workflow آموزش CPU به اینترنت متصل است، corpus آنلای�
 
 ## وضعیت فعلی
 
-پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. هر build فقط یک backend runtime دارد، backendهای GPU بر پایهٔ Vulkan هستند، GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند، CPU training scheduler و sampling بهینه‌تری دارد، و pipeline آموزش علاوه بر corpus آفلاین از corpus آنلاینِ قابل‌ردیابی و cache‌شده نیز استفاده می‌کند.
+پروژه اکنون سه backend اصلی و جدا دارد: **CPU Runner + AMD Vulkan + Android Vulkan**. هر build فقط یک backend runtime دارد، backendهای GPU بر پایهٔ Vulkan هستند، GPU desktop و Android از هستهٔ مشترک Vulkan استفاده می‌کنند، CPU و GPU اکنون هر دو RoPE روی Q/K دارند (دیگر معماری متفاوتی ندارند)، CPU training scheduler و sampling بهینه‌تری دارد، matmul مسیر CPU برای شکل غالب مدل بین چند thread موازی می‌شود، مقداردهی اولیهٔ وزن‌ها متناسب با fan-in است، و pipeline آموزش علاوه بر corpus آفلاین از corpus آنلاینِ قابل‌ردیابی و cache‌شده نیز استفاده می‌کند.
