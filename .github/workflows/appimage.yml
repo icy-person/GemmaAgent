@@ -21,6 +21,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Disable broken Google Chrome apt source
+        run: |
+          sudo grep -RIl 'dl.google.com/linux/chrome-stable/deb' /etc/apt/sources.list.d 2>/dev/null \
+            | xargs -r sudo rm -f
+
       - name: Install Linux packaging dependencies
         run: |
           sudo apt-get update
