@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=GemmaAgent
+Comment=Rust language model training and inference dashboard
+Exec=gemma-ui
+Icon=gemma-agent
+Terminal=false
+Categories=Development;Education;Science;
+StartupNotify=true
+StartupWMClass=gemma-ui
