@@ -50,36 +50,91 @@ impl Value {
         Self::leaf(r, c, d)
     }
     pub fn id(&self) -> usize { Rc::as_ptr(&self.0) as usize }
+    /// Returns an owned copy of the tensor's data. Prefer this only when you actually need an
+    /// owned `Vec` (e.g. returning it past the borrow, or across an `await`/thread boundary);
+    /// every op below borrows the underlying node directly instead of calling this, since
+    /// `RefCell` allows any number of simultaneous immutable borrows and avoids the allocation.
     pub fn data(&self) -> Vec<f32> { self.0.borrow().d.clone() }
     pub fn grad(&self) -> Vec<f32> { self.0.borrow().g.clone() }
     pub fn shape(&self) -> (usize, usize) { let n = self.0.borrow(); (n.r, n.c) }
     pub fn zero_grad(&self) { self.0.borrow_mut().g.fill(0.0); }
     pub fn set_data(&self, data: Vec<f32>) { assert_eq!(data.len(), self.0.borrow().d.len(), "parameter length mismatch"); self.0.borrow_mut().d = data; }
-    pub fn add(&self, rhs: &Self) -> Self { assert_eq!(self.shape(), rhs.shape(), "add shape mismatch"); let x=self.data(); let y=rhs.data(); Self::mk(self.shape().0,self.shape().1,x.iter().zip(y).map(|(a,b)|a+b).collect(),Op::Add(self.clone(),rhs.clone())) }
-    pub fn mul(&self, rhs: &Self) -> Self { assert_eq!(self.shape(), rhs.shape(), "mul shape mismatch"); let x=self.data(); let y=rhs.data(); Self::mk(self.shape().0,self.shape().1,x.iter().zip(y).map(|(a,b)|a*b).collect(),Op::Mul(self.clone(),rhs.clone())) }
-    pub fn scalar_mul(&self, scalar: f32) -> Self { assert!(scalar.is_finite()); self.mul(&Self::leaf(self.shape().0,self.shape().1,vec![scalar;self.data().len()])) }
+    pub fn add(&self, rhs: &Self) -> Self {
+        assert_eq!(self.shape(), rhs.shape(), "add shape mismatch");
+        let (rows, cols) = self.shape();
+        let out = { let a = self.0.borrow(); let b = rhs.0.borrow(); a.d.iter().zip(&b.d).map(|(x, y)| x + y).collect() };
+        Self::mk(rows, cols, out, Op::Add(self.clone(), rhs.clone()))
+    }
+    pub fn mul(&self, rhs: &Self) -> Self {
+        assert_eq!(self.shape(), rhs.shape(), "mul shape mismatch");
+        let (rows, cols) = self.shape();
+        let out = { let a = self.0.borrow(); let b = rhs.0.borrow(); a.d.iter().zip(&b.d).map(|(x, y)| x * y).collect() };
+        Self::mk(rows, cols, out, Op::Mul(self.clone(), rhs.clone()))
+    }
+    pub fn scalar_mul(&self, scalar: f32) -> Self { assert!(scalar.is_finite()); let (r, c) = self.shape(); self.mul(&Self::leaf(r, c, vec![scalar; r * c])) }
     pub fn div_scalar(&self, scalar: f32) -> Self { assert!(scalar.is_finite() && scalar != 0.0); self.scalar_mul(1.0/scalar) }
     pub fn matmul(&self, rhs: &Self) -> Self {
-        let (ar,ac)=self.shape(); let (br,bc)=rhs.shape(); assert_eq!(ac,br,"matmul shape mismatch: {ar}x{ac} · {br}x{bc}");
-        let x=self.data(); let y=rhs.data();
-        let out = matmul_raw(&x, &y, ar, ac, bc);
-        Self::mk(ar,bc,out,Op::MatMul(self.clone(),rhs.clone()))
+        let (ar, ac) = self.shape(); let (br, bc) = rhs.shape(); assert_eq!(ac, br, "matmul shape mismatch: {ar}x{ac} · {br}x{bc}");
+        let out = { let a = self.0.borrow(); let b = rhs.0.borrow(); matmul_raw(&a.d, &b.d, ar, ac, bc) };
+        Self::mk(ar, bc, out, Op::MatMul(self.clone(), rhs.clone()))
     }
-    pub fn transpose(&self) -> Self { let (rows,cols)=self.shape(); let x=self.data(); let mut out=vec![0.0;rows*cols]; for i in 0..rows {for j in 0..cols {out[j*rows+i]=x[i*cols+j];}} Self::mk(cols,rows,out,Op::Transpose(self.clone())) }
-    pub fn log(&self) -> Self { Self::mk(self.shape().0,self.shape().1,self.data().into_iter().map(|x|x.max(1e-20).ln()).collect(),Op::Log(self.clone())) }
-    pub fn neg(&self) -> Self { Self::mk(self.shape().0,self.shape().1,self.data().into_iter().map(|x|-x).collect(),Op::Neg(self.clone())) }
-    pub fn silu(&self) -> Self { Self::mk(self.shape().0,self.shape().1,self.data().into_iter().map(|x|x/(1.0+(-x).exp())).collect(),Op::Silu(self.clone())) }
+    pub fn transpose(&self) -> Self {
+        let (rows, cols) = self.shape();
+        let out = { let n = self.0.borrow(); let x = &n.d; let mut out = vec![0.0; rows * cols]; for i in 0..rows { for j in 0..cols { out[j * rows + i] = x[i * cols + j]; } } out };
+        Self::mk(cols, rows, out, Op::Transpose(self.clone()))
+    }
+    pub fn log(&self) -> Self { let (rows, cols) = self.shape(); let out = { let n = self.0.borrow(); n.d.iter().map(|x| x.max(1e-20).ln()).collect() }; Self::mk(rows, cols, out, Op::Log(self.clone())) }
+    pub fn neg(&self) -> Self { let (rows, cols) = self.shape(); let out = { let n = self.0.borrow(); n.d.iter().map(|x| -x).collect() }; Self::mk(rows, cols, out, Op::Neg(self.clone())) }
+    pub fn silu(&self) -> Self { let (rows, cols) = self.shape(); let out = { let n = self.0.borrow(); n.d.iter().map(|x| x / (1.0 + (-x).exp())).collect() }; Self::mk(rows, cols, out, Op::Silu(self.clone())) }
     pub fn rms_norm(&self, eps: f32) -> Self {
-        let (rows, cols)=self.shape(); assert_eq!(rows,1,"rms_norm expects a row vector"); assert!(eps.is_finite()&&eps>0.0);
-        let x=self.data(); let mean_sq=x.iter().map(|v|v*v).sum::<f32>()/cols as f32; let inv=(mean_sq+eps).sqrt().recip();
-        Self::mk(rows,cols,x.iter().map(|v|v*inv).collect(),Op::RmsNorm(self.clone(),eps))
+        let (rows, cols) = self.shape(); assert_eq!(rows, 1, "rms_norm expects a row vector"); assert!(eps.is_finite() && eps > 0.0);
+        let out = { let n = self.0.borrow(); let mean_sq = n.d.iter().map(|v| v * v).sum::<f32>() / cols as f32; let inv = (mean_sq + eps).sqrt().recip(); n.d.iter().map(|v| v * inv).collect() };
+        Self::mk(rows, cols, out, Op::RmsNorm(self.clone(), eps))
     }
-    pub fn softmax(&self) -> Self { let (rows,cols)=self.shape(); assert_eq!(rows,1,"softmax expects a row vector"); let x=self.data(); let max=x.iter().copied().fold(f32::NEG_INFINITY,f32::max); let exp:Vec<f32>=x.iter().map(|v|(*v-max).exp()).collect(); let sum=exp.iter().sum::<f32>().max(1e-20); Self::mk(1,cols,exp.into_iter().map(|v|v/sum).collect(),Op::Softmax(self.clone())) }
-    pub fn concat_rows(xs:&[Self])->Self { assert!(!xs.is_empty()); let cols=xs[0].shape().1; let mut data=Vec::new(); for x in xs {assert_eq!(x.shape(),(1,cols),"concat_rows shape mismatch"); data.extend(x.data());} Self::mk(xs.len(),cols,data,Op::ConcatRows(xs.to_vec())) }
-    pub fn concat_cols(xs:&[Self])->Self { assert!(!xs.is_empty()); let rows=xs[0].shape().0; let cols:usize=xs.iter().map(|x|{assert_eq!(x.shape().0,rows,"concat_cols row mismatch");x.shape().1}).sum(); let mut out=vec![0.0;rows*cols]; let mut offset=0; for x in xs {let width=x.shape().1; let data=x.data(); for i in 0..rows {out[i*cols+offset..i*cols+offset+width].copy_from_slice(&data[i*width..(i+1)*width]);} offset+=width;} Self::mk(rows,cols,out,Op::ConcatCols(xs.to_vec())) }
-    pub fn slice_cols(&self,start:usize,len:usize)->Self { let (rows,cols)=self.shape(); assert!(start<=cols&&len<=cols-start); let data=self.data(); let mut out=Vec::with_capacity(rows*len); for i in 0..rows {out.extend_from_slice(&data[i*cols+start..i*cols+start+len]);} Self::mk(rows,len,out,Op::Slice(self.clone(),start,len)) }
-    pub fn gather(&self,index:usize)->Self { let(rows,cols)=self.shape(); assert_eq!(rows,1,"gather expects a row vector"); assert!(index<cols); Self::mk(1,1,vec![self.data()[index]],Op::Gather(self.clone(),index)) }
-    pub fn row(&self,row:usize)->Self { let(rows,cols)=self.shape(); assert!(row<rows); let data=self.data(); Self::mk(1,cols,data[row*cols..(row+1)*cols].to_vec(),Op::RowGather(self.clone(),row)) }
+    pub fn softmax(&self) -> Self {
+        let (rows, cols) = self.shape(); assert_eq!(rows, 1, "softmax expects a row vector");
+        let out = { let n = self.0.borrow(); let max = n.d.iter().copied().fold(f32::NEG_INFINITY, f32::max); let exp: Vec<f32> = n.d.iter().map(|v| (*v - max).exp()).collect(); let sum = exp.iter().sum::<f32>().max(1e-20); exp.into_iter().map(|v| v / sum).collect() };
+        Self::mk(1, cols, out, Op::Softmax(self.clone()))
+    }
+    pub fn concat_rows(xs: &[Self]) -> Self {
+        assert!(!xs.is_empty());
+        let cols = xs[0].shape().1;
+        let refs: Vec<_> = xs.iter().map(|x| { assert_eq!(x.shape(), (1, cols), "concat_rows shape mismatch"); x.0.borrow() }).collect();
+        let mut data = Vec::with_capacity(xs.len() * cols);
+        for r in &refs { data.extend_from_slice(&r.d); }
+        drop(refs);
+        Self::mk(xs.len(), cols, data, Op::ConcatRows(xs.to_vec()))
+    }
+    pub fn concat_cols(xs: &[Self]) -> Self {
+        assert!(!xs.is_empty());
+        let rows = xs[0].shape().0;
+        let refs: Vec<_> = xs.iter().map(|x| { assert_eq!(x.shape().0, rows, "concat_cols row mismatch"); x.0.borrow() }).collect();
+        let cols: usize = refs.iter().map(|r| r.c).sum();
+        let mut out = vec![0.0; rows * cols];
+        let mut offset = 0;
+        for r in &refs {
+            let width = r.c;
+            for i in 0..rows { out[i * cols + offset..i * cols + offset + width].copy_from_slice(&r.d[i * width..(i + 1) * width]); }
+            offset += width;
+        }
+        drop(refs);
+        Self::mk(rows, cols, out, Op::ConcatCols(xs.to_vec()))
+    }
+    pub fn slice_cols(&self, start: usize, len: usize) -> Self {
+        let (rows, cols) = self.shape(); assert!(start <= cols && len <= cols - start);
+        let out = { let n = self.0.borrow(); let mut out = Vec::with_capacity(rows * len); for i in 0..rows { out.extend_from_slice(&n.d[i * cols + start..i * cols + start + len]); } out };
+        Self::mk(rows, len, out, Op::Slice(self.clone(), start, len))
+    }
+    pub fn gather(&self, index: usize) -> Self {
+        let (rows, cols) = self.shape(); assert_eq!(rows, 1, "gather expects a row vector"); assert!(index < cols);
+        let value = { let n = self.0.borrow(); n.d[index] };
+        Self::mk(1, 1, vec![value], Op::Gather(self.clone(), index))
+    }
+    pub fn row(&self, row: usize) -> Self {
+        let (rows, cols) = self.shape(); assert!(row < rows);
+        let out = { let n = self.0.borrow(); n.d[row * cols..(row + 1) * cols].to_vec() };
+        Self::mk(1, cols, out, Op::RowGather(self.clone(), row))
+    }
     pub fn backward(&self) { let mut order=Vec::new(); let mut seen=HashSet::new(); topo(self,&mut seen,&mut order); self.0.borrow_mut().g.fill(1.0); for node in order.into_iter().rev(){back(&node);} }
 }
 
@@ -173,5 +228,13 @@ mod tests{
     let mut expected=vec![0.0f32;bc];
     for k in 0..ac { for j in 0..bc { expected[j]+=xd[k]*yd[k*bc+j]; } }
     for(a,b) in result.data().iter().zip(expected.iter()) { assert!((a-b).abs()<1e-3,"parallel matmul diverged from manual dot product: {a} vs {b}"); }
+ }
+ #[test]fn add_and_mul_on_self_do_not_panic_on_double_borrow(){
+    // add(&self, &self) / mul(&self, &self) each take two immutable borrows of the *same*
+    // RefCell at once. RefCell permits any number of simultaneous immutable borrows, so this
+    // must not panic even though both arguments are the same node.
+    let a=Value::leaf(1,3,vec![1.,2.,3.]);
+    assert_eq!(a.add(&a).data(),vec![2.,4.,6.]);
+    assert_eq!(a.mul(&a).data(),vec![1.,4.,9.]);
  }
 }
