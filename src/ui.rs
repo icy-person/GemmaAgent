@@ -1,5 +1,5 @@
 use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Stroke, Vec2};
-use std::{io::{BufRead, BufReader}, process::{Child, Command, Stdio}, sync::{mpsc, Arc, Mutex}, thread, time::{Duration, Instant}};
+use std::{io::{BufRead, BufReader}, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{mpsc, Arc, Mutex}, thread, time::{Duration, Instant}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Backend { Cpu, Gpu }
@@ -50,186 +50,226 @@ impl GemmaUi {
     }
     fn notify(&mut self, text: impl Into<String>) { self.toast = Some((text.into(), Instant::now())); }
     fn poll_logs(&mut self) { while let Ok(line) = self.rx.try_recv() { self.logs.push(line); if self.logs.len() > 600 { self.logs.drain(..100); } } }
-   fn start_job(&mut self) {
-    if self.job.running() {
-        return;
-    }
+    fn project_root() -> Option<PathBuf> {
+        let starts = [
+            std::env::current_dir().ok(),
+            std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+        ];
 
-    let mut command = Command::new("cargo");
-    command.arg("run").arg("--release");
-
-    let bin = match self.backend {
-        Backend::Cpu => "cpu-train",
-        Backend::Gpu => "amd-train",
-    };
-
-    if matches!(self.backend, Backend::Gpu) {
-        command.arg("--features").arg("amd-vulkan");
-    }
-
-    command
-        .arg("--bin")
-        .arg(bin)
-        .arg("--")
-        .arg("--target")
-        .arg("--steps")
-        .arg(self.steps.to_string());
-
-    command
-        .arg("--data")
-        .arg(&self.data_path)
-        .arg("--checkpoint")
-        .arg(&self.checkpoint);
-
-    match self.backend {
-        Backend::Cpu => {
-            command
-                .arg("--grad-accum")
-                .arg(self.grad_accum.to_string())
-                .arg("--targets-per-step")
-                .arg(self.targets.to_string())
-                .arg("--train-context")
-                .arg(self.context.to_string())
-                .arg("--lr")
-                .arg(self.lr.to_string());
-
-            if !self.val_path.is_empty() {
-                command.arg("--val-data").arg(&self.val_path);
+        for start in starts.into_iter().flatten() {
+            let mut dir = start;
+            loop {
+                if dir.join("Cargo.toml").is_file() {
+                    return Some(dir);
+                }
+                if !dir.pop() {
+                    break;
+                }
             }
+        }
+        None
+    }
 
-            if !self.resume.is_empty() {
-                command.arg("--resume").arg(&self.resume);
+    fn find_trainer(name: &str) -> Option<PathBuf> {
+        let mut candidates = Vec::new();
+
+        // Bundled AppImage/runtime locations: keep trainers next to the UI
+        // or in a small bin directory beside it.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join(name));
+                candidates.push(dir.join("bin").join(name));
+                candidates.push(dir.join("trainers").join(name));
             }
         }
 
-        Backend::Gpu => {
-            command
-                .arg("--batch-size")
-                .arg(self.batch.to_string())
-                .arg("--grad-accum")
-                .arg(self.grad_accum.to_string())
-                .arg("--lr")
-                .arg(self.lr.to_string())
-                .arg("--checkpoint-every")
-                .arg(self.checkpoint_every.to_string())
-                .arg("--eval-every")
-                .arg(self.eval_every.to_string())
-                .arg("--gpu")
-                .arg(self.gpu.to_string())
-                .arg("--gpu-kind")
-                .arg(&self.gpu_kind)
-                .arg("--gpu-util")
-                .arg(self.gpu_util.to_string());
+        // Development checkout: prefer already-built release/debug binaries.
+        if let Some(root) = Self::project_root() {
+            candidates.push(root.join("target").join("release").join(name));
+            candidates.push(root.join("target").join("debug").join(name));
+            candidates.push(root.join("bin").join(name));
+            candidates.push(root.join("trainers").join(name));
+        }
 
-            if !self.resume.is_empty() {
-                command.arg("--resume").arg(&self.resume);
+        for path in candidates {
+            if path.is_file() {
+                return Some(path);
             }
         }
+
+        // Finally allow an installed trainer available through PATH.
+        if let Ok(path_var) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                let path = dir.join(name);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+
+        None
     }
 
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    fn start_job(&mut self) {
+        if self.job.running() {
+            return;
+        }
 
-    let tx = self.tx.clone();
-    let child_slot = self.job.child.clone();
+        let bin = match self.backend {
+            Backend::Cpu => "cpu-train",
+            Backend::Gpu => "amd-train",
+        };
 
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let trainer = match Self::find_trainer(bin) {
+            Some(path) => path,
+            None => {
+                let message = format!("Trainer not found: {bin}");
+                self.logs.push(message.clone());
+                self.notify(message);
+                return;
+            }
+        };
 
-    thread::spawn(move || {
-        let _ = tx.send(format!(
-            "Launching {bin} from {}",
-            cwd.display()
-        ));
+        let trainer_display = trainer.display().to_string();
+        let working_dir = Self::project_root()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
 
-        match command.current_dir(cwd).spawn() {
-            Ok(mut child) => {
-                // Take the two pipes before moving `child` into the shared slot.
-                let stdout = child.stdout.take();
-                let stderr = child.stderr.take();
+        let mut command = Command::new(&trainer);
 
-                if let Ok(mut slot) = child_slot.lock() {
-                    *slot = Some(child);
+        command
+            .arg("--target")
+            .arg("--steps")
+            .arg(self.steps.to_string())
+            .arg("--data")
+            .arg(&self.data_path)
+            .arg("--checkpoint")
+            .arg(&self.checkpoint);
+
+        match self.backend {
+            Backend::Cpu => {
+                command
+                    .arg("--grad-accum")
+                    .arg(self.grad_accum.to_string())
+                    .arg("--targets-per-step")
+                    .arg(self.targets.to_string())
+                    .arg("--train-context")
+                    .arg(self.context.to_string())
+                    .arg("--lr")
+                    .arg(self.lr.to_string());
+
+                if !self.val_path.is_empty() {
+                    command.arg("--val-data").arg(&self.val_path);
                 }
-
-                // stdout reader
-                if let Some(stdout) = stdout {
-                    let tx_stdout = tx.clone();
-
-                    thread::spawn(move || {
-                        let reader = BufReader::new(stdout);
-
-                        for line in reader.lines().flatten() {
-                            let _ = tx_stdout.send(line);
-                        }
-                    });
+                if !self.resume.is_empty() {
+                    command.arg("--resume").arg(&self.resume);
                 }
+            }
+            Backend::Gpu => {
+                command
+                    .arg("--batch-size")
+                    .arg(self.batch.to_string())
+                    .arg("--grad-accum")
+                    .arg(self.grad_accum.to_string())
+                    .arg("--lr")
+                    .arg(self.lr.to_string())
+                    .arg("--checkpoint-every")
+                    .arg(self.checkpoint_every.to_string())
+                    .arg("--eval-every")
+                    .arg(self.eval_every.to_string())
+                    .arg("--gpu")
+                    .arg(self.gpu.to_string())
+                    .arg("--gpu-kind")
+                    .arg(&self.gpu_kind)
+                    .arg("--gpu-util")
+                    .arg(self.gpu_util.to_string());
 
-                // stderr reader
-                if let Some(stderr) = stderr {
-                    let tx_stderr = tx.clone();
-
-                    thread::spawn(move || {
-                        let reader = BufReader::new(stderr);
-
-                        for line in reader.lines().flatten() {
-                            let _ = tx_stderr.send(line);
-                        }
-                    });
+                if !self.resume.is_empty() {
+                    command.arg("--resume").arg(&self.resume);
                 }
+            }
+        }
 
-                // Monitor process lifetime
-                loop {
-                    let done = match child_slot.lock() {
-                        Ok(mut slot) => {
-                            match slot.as_mut() {
-                                Some(c) => match c.try_wait() {
+        command
+            .current_dir(&working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let tx = self.tx.clone();
+        let child_slot = self.job.child.clone();
+        let working_dir_display = working_dir.display().to_string();
+
+        thread::spawn(move || {
+            let _ = tx.send(format!("Launching {bin}: {trainer_display}"));
+            let _ = tx.send(format!("Working directory: {working_dir_display}"));
+
+            match command.spawn() {
+                Ok(mut child) => {
+                    let stdout = child.stdout.take();
+                    let stderr = child.stderr.take();
+
+                    if let Ok(mut slot) = child_slot.lock() {
+                        *slot = Some(child);
+                    }
+
+                    if let Some(stdout) = stdout {
+                        let tx_stdout = tx.clone();
+                        thread::spawn(move || {
+                            let reader = BufReader::new(stdout);
+                            for line in reader.lines().flatten() {
+                                let _ = tx_stdout.send(line);
+                            }
+                        });
+                    }
+
+                    if let Some(stderr) = stderr {
+                        let tx_stderr = tx.clone();
+                        thread::spawn(move || {
+                            let reader = BufReader::new(stderr);
+                            for line in reader.lines().flatten() {
+                                let _ = tx_stderr.send(line);
+                            }
+                        });
+                    }
+
+                    loop {
+                        let done = match child_slot.lock() {
+                            Ok(mut slot) => match slot.as_mut() {
+                                Some(child) => match child.try_wait() {
                                     Ok(Some(status)) => {
-                                        let _ = tx.send(format!(
-                                            "Process exited: {status}"
-                                        ));
+                                        let _ = tx.send(format!("Process exited: {status}"));
                                         true
                                     }
-
                                     Ok(None) => false,
-
                                     Err(e) => {
-                                        let _ = tx.send(format!(
-                                            "Process error: {e}"
-                                        ));
+                                        let _ = tx.send(format!("Process error: {e}"));
                                         true
                                     }
                                 },
-
                                 None => true,
+                            },
+                            Err(_) => true,
+                        };
+
+                        if done {
+                            if let Ok(mut slot) = child_slot.lock() {
+                                *slot = None;
                             }
+                            break;
                         }
 
-                        Err(_) => true,
-                    };
-
-                    if done {
-                        if let Ok(mut slot) = child_slot.lock() {
-                            *slot = None;
-                        }
-
-                        break;
+                        thread::sleep(Duration::from_millis(250));
                     }
-
-                    thread::sleep(Duration::from_millis(250));
+                }
+                Err(e) => {
+                    let _ = tx.send(format!("Failed to launch {bin}: {e}"));
                 }
             }
+        });
 
-            Err(e) => {
-                let _ = tx.send(format!(
-                    "Failed to launch: {e}"
-                ));
-            }
-        }
-    });
-
-    self.started = Some(Instant::now());
-    self.notify("Training process started");
-}
+        self.started = Some(Instant::now());
+        self.notify(format!("Started {bin}"));
+    }
     fn nav(&mut self, ui: &mut egui::Ui) {
         let items = [(Page::Dashboard,"⌂","Dashboard"),(Page::Training,"▶","Training"),(Page::Inference,"✦","Inference"),(Page::Hardware,"▣","Hardware"),(Page::Data,"▤","Data"),(Page::Settings,"⚙","Settings"),(Page::Logs,"≡","Logs")];
         for (page, icon, label) in items {
