@@ -64,7 +64,7 @@ pub struct GemmaUi {
 impl GemmaUi {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = mpsc::channel();
-        let mut app = Self {
+        let app = Self {
             page: Page::Dashboard, backend: Backend::Gpu, precision: Precision::Mixed,
             accent: Color32::from_rgb(0, 105, 92), dark: true, compact: false,
             steps: 5000, batch: 2, grad_accum: 1, targets: 256, context: 1024,
@@ -124,7 +124,11 @@ impl GemmaUi {
                 Ok(mut child) => {
                     let stdout = child.stdout.take(); let stderr = child.stderr.take();
                     if let Ok(mut slot) = child_slot.lock() { *slot = Some(child); }
-                    for stream in [stdout.map(BufReader::new), stderr.map(BufReader::new)].into_iter().flatten() {
+                    if let Some(stream) = stdout.map(BufReader::new) {
+                        let tx2 = tx.clone();
+                        thread::spawn(move || { for line in stream.lines().flatten() { let _ = tx2.send(line); } });
+                    }
+                    if let Some(stream) = stderr.map(BufReader::new) {
                         let tx2 = tx.clone();
                         thread::spawn(move || { for line in stream.lines().flatten() { let _ = tx2.send(line); } });
                     }
@@ -166,62 +170,112 @@ impl GemmaUi {
         });
     }
 
-    fn card<R>(&self, ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) {
+    fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) {
         Frame::new().fill(ui.visuals().faint_bg_color).stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)).corner_radius(CornerRadius::same(22)).inner_margin(Margin::same(18)).show(ui, |ui| { ui.label(RichText::new(title).size(17.0).strong()); ui.add_space(10.0); add(ui); });
     }
 
     fn dashboard(&mut self, ui: &mut egui::Ui) {
         ui.heading("Training workspace"); ui.label("One control surface for CPU, AMD Vulkan, datasets, checkpoints and inference."); ui.add_space(14.0);
         ui.columns(3, |cols| {
-            self.card(&mut cols[0], "Compute", |ui| { ui.label(if self.backend==Backend::Cpu { "CPU · Rust autograd" } else { "GPU · AMD Vulkan / WGPU" }); ui.add_space(8.0); ui.horizontal(|ui| { if ui.selectable_label(self.backend==Backend::Cpu,"CPU").clicked(){self.backend=Backend::Cpu; self.notify("Backend switched to CPU");} if ui.selectable_label(self.backend==Backend::Gpu,"GPU").clicked(){self.backend=Backend::Gpu; self.notify("Backend switched to GPU");} }); });
-            self.card(&mut cols[1], "Model", |ui| { ui.label(&self.model); ui.label(format!("Context {} · LR {:.5}", self.context, self.lr)); });
-            self.card(&mut cols[2], "Process", |ui| { ui.label(if self.job.running(){"Training is active"}else{"No active job"}); if self.job.running(){ if ui.button("Stop training").clicked(){self.job.stop(); self.notify("Training stopped");} } else if ui.button("Start training").clicked(){self.start_job();} });
+            Self::card(&mut cols[0], "Compute", |ui| { ui.label(if self.backend==Backend::Cpu { "CPU · Rust autograd" } else { "GPU · AMD Vulkan / WGPU" }); ui.add_space(8.0); ui.horizontal(|ui| { if ui.selectable_label(self.backend==Backend::Cpu,"CPU").clicked(){self.backend=Backend::Cpu; self.notify("Backend switched to CPU");} if ui.selectable_label(self.backend==Backend::Gpu,"GPU").clicked(){self.backend=Backend::Gpu; self.notify("Backend switched to GPU");} }); });
+            Self::card(&mut cols[1], "Model", |ui| { ui.label(&self.model); ui.label(format!("Context {} · LR {:.5}", self.context, self.lr)); });
+            Self::card(&mut cols[2], "Process", |ui| { ui.label(if self.job.running(){"Training is active"}else{"No active job"}); if self.job.running(){ if ui.button("Stop training").clicked(){self.job.stop(); self.notify("Training stopped");} } else if ui.button("Start training").clicked(){self.start_job();} });
         });
         ui.add_space(14.0);
         ui.columns(2, |cols| {
-            self.card(&mut cols[0], "Training profile", |ui| { metric(ui,"Steps",&self.steps.to_string()); metric(ui,"Batch",&self.batch.to_string()); metric(ui,"Grad accumulation",&self.grad_accum.to_string()); metric(ui,"Precision",match self.precision {Precision::F32=>"F32",Precision::F16=>"F16",Precision::Mixed=>"Mixed"}); });
-            self.card(&mut cols[1], "Performance", |ui| { let elapsed=self.started.map(|t|t.elapsed().as_secs()).unwrap_or(0); metric(ui,"Elapsed",&format!("{}m {:02}s",elapsed/60,elapsed%60)); metric(ui,"GPU target",&format!("{:.0}%",self.gpu_util)); metric(ui,"KV cache",if self.kv_cache{"Enabled"}else{"Disabled"}); metric(ui,"Flash attention",if self.flash_attention{"Enabled"}else{"Disabled"}); });
+            Self::card(&mut cols[0], "Training profile", |ui| { metric(ui,"Steps",&self.steps.to_string()); metric(ui,"Batch",&self.batch.to_string()); metric(ui,"Grad accumulation",&self.grad_accum.to_string()); metric(ui,"Precision",match self.precision {Precision::F32=>"F32",Precision::F16=>"F16",Precision::Mixed=>"Mixed"}); });
+            Self::card(&mut cols[1], "Performance", |ui| { let elapsed=self.started.map(|t|t.elapsed().as_secs()).unwrap_or(0); metric(ui,"Elapsed",&format!("{}m {:02}s",elapsed/60,elapsed%60)); metric(ui,"GPU target",&format!("{:.0}%",self.gpu_util)); metric(ui,"KV cache",if self.kv_cache{"Enabled"}else{"Disabled"}); metric(ui,"Flash attention",if self.flash_attention{"Enabled"}else{"Disabled"}); });
         });
     }
 
     fn training(&mut self, ui: &mut egui::Ui) {
         ui.heading("Training"); ui.add_space(12.0);
-        self.card(ui,"Compute backend",|ui|{ ui.horizontal(|ui|{ if ui.selectable_label(self.backend==Backend::Cpu,"CPU").clicked(){self.backend=Backend::Cpu;} if ui.selectable_label(self.backend==Backend::Gpu,"GPU · AMD Vulkan").clicked(){self.backend=Backend::Gpu;} }); ui.small("The selector changes the actual trainer binary used by Start training."); }); ui.add_space(12.0);
+        Self::card(ui,"Compute backend",|ui|{ ui.horizontal(|ui|{ if ui.selectable_label(self.backend==Backend::Cpu,"CPU").clicked(){self.backend=Backend::Cpu;} if ui.selectable_label(self.backend==Backend::Gpu,"GPU · AMD Vulkan").clicked(){self.backend=Backend::Gpu;} }); ui.small("The selector changes the actual trainer binary used by Start training."); }); ui.add_space(12.0);
         ui.columns(2,|cols|{
-            self.card(&mut cols[0],"Optimization",|ui|{ slider(ui,"Steps",&mut self.steps,100,100000); slider(ui,"Batch size",&mut self.batch,1,64); slider(ui,"Grad accumulation",&mut self.grad_accum,1,64); slider_f64(ui,"Learning rate",&mut self.lr,0.000001,0.01); slider(ui,"Checkpoint every",&mut self.checkpoint_every,0,10000); slider(ui,"Eval every",&mut self.eval_every,0,10000); });
-            self.card(&mut cols[1],"Architecture / memory",|ui|{ slider(ui,"Context",&mut self.context,128,4096); slider(ui,"Targets per step",&mut self.targets,1,1024); ui.checkbox(&mut self.kv_cache,"KV cache"); ui.checkbox(&mut self.flash_attention,"Flash/tiled attention"); ui.checkbox(&mut self.pinned_memory,"Pinned/reused buffers"); ui.horizontal(|ui|{ui.label("Precision"); for (p,n) in [(Precision::F32,"F32"),(Precision::Mixed,"Mixed"),(Precision::F16,"F16")]{ui.selectable_value(&mut self.precision,p,n);}}); });
-        }); ui.add_space(12.0); self.card(ui,"Paths",|ui|{ text(ui,"Training data",&mut self.data_path); text(ui,"Validation data",&mut self.val_path); text(ui,"Checkpoint",&mut self.checkpoint); text(ui,"Resume",&mut self.resume); });
+            Self::card(&mut cols[0],"Optimization",|ui|{ slider(ui,"Steps",&mut self.steps,100,100000); slider(ui,"Batch size",&mut self.batch,1,64); slider(ui,"Grad accumulation",&mut self.grad_accum,1,64); slider_f64(ui,"Learning rate",&mut self.lr,0.000001,0.01); slider(ui,"Checkpoint every",&mut self.checkpoint_every,0,10000); slider(ui,"Eval every",&mut self.eval_every,0,10000); });
+            Self::card(&mut cols[1],"Architecture / memory",|ui|{ slider(ui,"Context",&mut self.context,128,4096); slider(ui,"Targets per step",&mut self.targets,1,1024); ui.checkbox(&mut self.kv_cache,"KV cache"); ui.checkbox(&mut self.flash_attention,"Flash/tiled attention"); ui.checkbox(&mut self.pinned_memory,"Pinned/reused buffers"); ui.horizontal(|ui|{ui.label("Precision"); for (p,n) in [(Precision::F32,"F32"),(Precision::Mixed,"Mixed"),(Precision::F16,"F16")]{ui.selectable_value(&mut self.precision,p,n);}}); });
+        }); ui.add_space(12.0); Self::card(ui,"Paths",|ui|{ text(ui,"Training data",&mut self.data_path); text(ui,"Validation data",&mut self.val_path); text(ui,"Checkpoint",&mut self.checkpoint); text(ui,"Resume",&mut self.resume); });
         ui.add_space(12.0); ui.horizontal(|ui|{if self.job.running(){if ui.button("Stop").clicked(){self.job.stop();}}else if ui.button(RichText::new("Start training").color(Color32::WHITE)).clicked(){self.start_job();} if ui.button("Open logs").clicked(){self.page=Page::Logs;}});
     }
 
     fn inference(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Inference"); ui.add_space(12.0); self.card(ui,"Generation",|ui|{ text(ui,"Model",&mut self.model); slider_f32(ui,"Temperature",&mut self.temperature,0.0,2.0); slider_f32(ui,"Top-p",&mut self.top_p,0.05,1.0); slider(ui,"Top-k",&mut self.top_k,0,500); ui.add(egui::DragValue::new(&mut self.seed).prefix("Seed ")); ui.checkbox(&mut self.kv_cache,"Use KV cache"); }); ui.add_space(12.0); self.card(ui,"Runtime",|ui|{ui.label(format!("Backend: {}",if self.backend==Backend::Cpu{"CPU"}else{"AMD Vulkan GPU"})); ui.label(format!("Precision: {}",match self.precision{Precision::F32=>"F32",Precision::F16=>"F16",Precision::Mixed=>"Mixed"}));});
+        ui.heading("Inference"); ui.add_space(12.0); Self::card(ui,"Generation",|ui|{ text(ui,"Model",&mut self.model); slider_f32(ui,"Temperature",&mut self.temperature,0.0,2.0); slider_f32(ui,"Top-p",&mut self.top_p,0.05,1.0); slider(ui,"Top-k",&mut self.top_k,0,500); ui.add(egui::DragValue::new(&mut self.seed).prefix("Seed ")); ui.checkbox(&mut self.kv_cache,"Use KV cache"); }); ui.add_space(12.0); Self::card(ui,"Runtime",|ui|{ui.label(format!("Backend: {}",if self.backend==Backend::Cpu{"CPU"}else{"AMD Vulkan GPU"})); ui.label(format!("Precision: {}",match self.precision{Precision::F32=>"F32",Precision::F16=>"F16",Precision::Mixed=>"Mixed"}));});
     }
 
     fn hardware(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Hardware"); ui.add_space(12.0); self.card(ui,"GPU runtime",|ui|{ui.horizontal(|ui|{ui.label("GPU kind"); egui::ComboBox::from_id_salt("gpu-kind").selected_text(&self.gpu_kind).show_ui(ui, |ui| { for k in ["integrated","discrete","best"] { ui.selectable_value(&mut self.gpu_kind,k.to_owned(),k); } });}); slider(ui,"GPU index",&mut self.gpu,0,8); slider_f64(ui,"GPU utilization target",&mut self.gpu_util,1.0,100.0); ui.checkbox(&mut self.power_limit,"Respect GPU utilization target"); ui.label("AMD trainer arguments are generated from these values."); }); ui.add_space(12.0); self.card(ui,"CPU runtime",|ui|{slider(ui,"Worker threads",&mut self.cpu_threads,1,32); ui.label("CPU trainer remains available even when the UI itself is GPU-rendered.");});
+        ui.heading("Hardware"); ui.add_space(12.0); Self::card(ui,"GPU runtime",|ui|{ui.horizontal(|ui|{ui.label("GPU kind"); egui::ComboBox::from_id_salt("gpu-kind").selected_text(&self.gpu_kind).show_ui(ui, |ui| { for k in ["integrated","discrete","best"] { ui.selectable_value(&mut self.gpu_kind,k.to_owned(),k); } });}); slider(ui,"GPU index",&mut self.gpu,0,8); slider_f64(ui,"GPU utilization target",&mut self.gpu_util,1.0,100.0); ui.checkbox(&mut self.power_limit,"Respect GPU utilization target"); ui.label("AMD trainer arguments are generated from these values."); }); ui.add_space(12.0); Self::card(ui,"CPU runtime",|ui|{slider(ui,"Worker threads",&mut self.cpu_threads,1,32); ui.label("CPU trainer remains available even when the UI itself is GPU-rendered.");});
     }
 
-    fn data(&mut self, ui: &mut egui::Ui) { ui.heading("Data & checkpoints"); ui.add_space(12.0); self.card(ui,"Dataset",|ui|{text(ui,"Train corpus",&mut self.data_path); text(ui,"Validation corpus",&mut self.val_path);}); ui.add_space(12.0); self.card(ui,"Checkpoint policy",|ui|{text(ui,"Checkpoint path",&mut self.checkpoint); text(ui,"Resume from",&mut self.resume); ui.checkbox(&mut self.auto_save,"Auto-save final checkpoint");}); }
+    fn data(&mut self, ui: &mut egui::Ui) { ui.heading("Data & checkpoints"); ui.add_space(12.0); Self::card(ui,"Dataset",|ui|{text(ui,"Train corpus",&mut self.data_path); text(ui,"Validation corpus",&mut self.val_path);}); ui.add_space(12.0); Self::card(ui,"Checkpoint policy",|ui|{text(ui,"Checkpoint path",&mut self.checkpoint); text(ui,"Resume from",&mut self.resume); ui.checkbox(&mut self.auto_save,"Auto-save final checkpoint");}); }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings"); ui.add_space(12.0); self.card(ui,"Material You",|ui|{ui.horizontal(|ui|{ui.label("Accent"); let mut rgb=[self.accent.r(),self.accent.g(),self.accent.b()]; if ui.color_edit_button_srgb(&mut rgb).changed(){self.accent=Color32::from_rgb(rgb[0],rgb[1],rgb[2]); configure_theme(ui.ctx(),self.accent,self.dark,self.compact);}}); ui.checkbox(&mut self.dark,"Dark theme"); ui.checkbox(&mut self.compact,"Compact density");}); ui.add_space(12.0); self.card(ui,"Application",|ui|{ui.checkbox(&mut self.notifications,"Desktop notifications"); ui.label("Settings are applied immediately to this session.");}); }
+        ui.heading("Settings"); ui.add_space(12.0); Self::card(ui,"Material You",|ui|{ui.horizontal(|ui|{ui.label("Accent"); let mut rgb=[self.accent.r(),self.accent.g(),self.accent.b()]; if ui.color_edit_button_srgb(&mut rgb).changed(){self.accent=Color32::from_rgb(rgb[0],rgb[1],rgb[2]); configure_theme(ui.ctx(),self.accent,self.dark,self.compact);}}); ui.checkbox(&mut self.dark,"Dark theme"); ui.checkbox(&mut self.compact,"Compact density");}); ui.add_space(12.0); Self::card(ui,"Application",|ui|{ui.checkbox(&mut self.notifications,"Desktop notifications"); ui.label("Settings are applied immediately to this session.");}); }
 
     fn logs(&mut self, ui: &mut egui::Ui) { ui.heading("Logs"); ui.add_space(10.0); Frame::new().fill(Color32::from_black_alpha(if self.dark{70}else{20})).corner_radius(CornerRadius::same(18)).inner_margin(Margin::same(12)).show(ui, |ui| { egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| { for line in &self.logs { ui.monospace(line); } }); }); }
 }
 
 impl eframe::App for GemmaUi {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.poll_logs();
         if self.job.running() { ctx.request_repaint_after(Duration::from_millis(200)); }
-        egui::TopBottomPanel::top("top").frame(Frame::new().fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(20,14))).show(ctx,|ui|self.topbar(ui));
-        egui::SidePanel::left("nav").resizable(false).exact_width(220.0).frame(Frame::new().fill(ctx.style().visuals.panel_fill).inner_margin(Margin::symmetric(14,20))).show(ctx,|ui|{ui.label(RichText::new("CONTROL CENTER").size(11.0).color(self.accent));ui.add_space(14.0);self.nav(ui);ui.with_layout(Layout::bottom_up(Align::Center), |ui| { ui.separator(); ui.small("GemmaAgent · Rust"); });});
-        egui::CentralPanel::default().frame(Frame::new().inner_margin(Margin::symmetric(28,24))).show(ctx,|ui|{egui::ScrollArea::vertical().auto_shrink([false,false]).show(ui,|ui|match self.page{Page::Dashboard=>self.dashboard(ui),Page::Training=>self.training(ui),Page::Inference=>self.inference(ui),Page::Hardware=>self.hardware(ui),Page::Data=>self.data(ui),Page::Settings=>self.settings(ui),Page::Logs=>self.logs(ui)});});
-        if let Some((msg,t))=&self.toast {if t.elapsed()<Duration::from_secs(3){egui::Area::new("toast".into()).anchor(egui::Align2::RIGHT_BOTTOM,[-24.0,-24.0]).show(ctx,|ui|{Frame::new().fill(self.accent).corner_radius(CornerRadius::same(18)).inner_margin(Margin::symmetric(16,11)).show(ui,|ui|ui.label(RichText::new(msg).color(Color32::WHITE)));});}else{self.toast=None;}}
+
+        let panel_fill = ui.visuals().panel_fill;
+        egui::TopBottomPanel::top("top")
+            .frame(Frame::new().fill(panel_fill).inner_margin(Margin::symmetric(20, 14)))
+            .show(ui, |ui| self.topbar(ui));
+
+        egui::SidePanel::left("nav")
+            .resizable(false)
+            .exact_width(220.0)
+            .frame(Frame::new().fill(panel_fill).inner_margin(Margin::symmetric(14, 20)))
+            .show(ui, |ui| {
+                ui.label(RichText::new("CONTROL CENTER").size(11.0).color(self.accent));
+                ui.add_space(14.0);
+                self.nav(ui);
+                ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
+                    ui.separator();
+                    ui.small("GemmaAgent · Rust");
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(Frame::new().inner_margin(Margin::symmetric(28, 24)))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.page {
+                        Page::Dashboard => self.dashboard(ui),
+                        Page::Training => self.training(ui),
+                        Page::Inference => self.inference(ui),
+                        Page::Hardware => self.hardware(ui),
+                        Page::Data => self.data(ui),
+                        Page::Settings => self.settings(ui),
+                        Page::Logs => self.logs(ui),
+                    });
+            });
+
+        if let Some((msg, t)) = &self.toast {
+            if t.elapsed() < Duration::from_secs(3) {
+                let msg = msg.clone();
+                let accent = self.accent;
+                egui::Area::new("toast".into())
+                    .anchor(egui::Align2::RIGHT_BOTTOM, [-24.0, -24.0])
+                    .show(&ctx, |ui| {
+                        Frame::new()
+                            .fill(accent)
+                            .corner_radius(CornerRadius::same(18))
+                            .inner_margin(Margin::symmetric(16, 11))
+                            .show(ui, |ui| ui.label(RichText::new(msg).color(Color32::WHITE)));
+                    });
+            } else {
+                self.toast = None;
+            }
+        }
     }
 }
 
-fn configure_theme(ctx:&egui::Context, accent:Color32, dark:bool, compact:bool){let mut style=(*ctx.style()).clone();style.spacing.item_spacing=if compact{Vec2::new(8.0,6.0)}else{Vec2::new(10.0,9.0)};style.visuals=if dark{egui::Visuals::dark()}else{egui::Visuals::light()};style.visuals.selection.bg_fill=accent;style.visuals.selection.stroke=Stroke::new(1.0,accent);style.visuals.hyperlink_color=accent;style.visuals.widgets.active.bg_fill=accent;style.visuals.widgets.hovered.bg_fill=accent.gamma_multiply(0.18);style.visuals.widgets.hovered.fg_stroke.color=accent;style.visuals.widgets.active.fg_stroke.color=Color32::WHITE;style.visuals.window_corner_radius=CornerRadius::same(24);ctx.set_style(style);}
+fn configure_theme(ctx:&egui::Context, accent:Color32, dark:bool, compact:bool){let theme=if dark{egui::Theme::Dark}else{egui::Theme::Light};let mut style=(*ctx.style_of(theme)).clone();style.spacing.item_spacing=if compact{Vec2::new(8.0,6.0)}else{Vec2::new(10.0,9.0)};style.visuals=if dark{egui::Visuals::dark()}else{egui::Visuals::light()};style.visuals.selection.bg_fill=accent;style.visuals.selection.stroke=Stroke::new(1.0,accent);style.visuals.hyperlink_color=accent;style.visuals.widgets.active.bg_fill=accent;style.visuals.widgets.hovered.bg_fill=accent.gamma_multiply(0.18);style.visuals.widgets.hovered.fg_stroke.color=accent;style.visuals.widgets.active.fg_stroke.color=Color32::WHITE;style.visuals.window_corner_radius=CornerRadius::same(24);ctx.set_style_of(theme,style);}
 fn metric(ui:&mut egui::Ui,k:&str,v:&str){ui.horizontal(|ui|{ui.label(RichText::new(k).color(ui.visuals().weak_text_color()));ui.with_layout(Layout::right_to_left(Align::Center),|ui|ui.label(RichText::new(v).strong()));});}
 fn slider(ui:&mut egui::Ui,label:&str,v:&mut usize,min:usize,max:usize){ui.horizontal(|ui|{ui.label(label);ui.add(egui::Slider::new(v,min..=max).show_value(true));});}
 fn slider_f64(ui:&mut egui::Ui,label:&str,v:&mut f64,min:f64,max:f64){ui.horizontal(|ui|{ui.label(label);ui.add(egui::Slider::new(v,min..=max).logarithmic(true));});}
