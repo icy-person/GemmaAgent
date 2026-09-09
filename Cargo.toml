@@ -16,6 +16,11 @@ android-vulkan=["dep:burn","dep:burn-wgpu","burn/std","burn/autodiff","burn/wgpu
 [dependencies]
 burn={version="0.21.0",default-features=false,optional=true}
 burn-wgpu={version="0.21.0",default-features=false,optional=true}
+eframe={version="0.36.2",default-features=true}
+
+[[bin]]
+name="gemma-ui"
+path="src/bin/gemma-ui.rs"
 
 [[bin]]
 name="cpu-train"
