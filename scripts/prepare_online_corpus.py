@@ -96,6 +96,8 @@ def safe_slug(title: str) -> str:
 
 
 def search_topic(topic: str, limit: int, timeout: int, retries: int, delay: float) -> list[dict]:
+    # Do not request `revisions` here. MediaWiki forbids rvlimit/rvprop on a
+    # generator such as `generator=search`. `info` already exposes lastrevid.
     payload = api(
         {
             "action": "query",
@@ -105,12 +107,10 @@ def search_topic(topic: str, limit: int, timeout: int, retries: int, delay: floa
             "gsrsearch": topic,
             "gsrnamespace": "0",
             "gsrlimit": str(min(limit, 20)),
-            "prop": "extracts|info|revisions",
+            "prop": "extracts|info",
             "explaintext": "1",
             "exchars": "1200",
             "inprop": "url",
-            "rvprop": "ids",
-            "rvlimit": "1",
         },
         timeout,
         retries,
@@ -138,10 +138,10 @@ def write_page(out: Path, page: dict, topic: str) -> dict | None:
     extract = normalize(str(page.get("extract", "")))
     if not pageid or not title or not extract:
         return None
-    revision_id = None
-    revisions = page.get("revisions") or []
-    if revisions:
-        revision_id = revisions[0].get("revid")
+
+    # `lastrevid` is supplied by the `info` property and works with a
+    # generator=search query, unlike the revisions module parameters.
+    revision_id = page.get("lastrevid")
     source_url = page.get("fullurl") or f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
     path = out / "pages" / f"{pageid}_{safe_slug(title)}.txt"
     path.write_text(extract + "\n\n", encoding="utf-8")

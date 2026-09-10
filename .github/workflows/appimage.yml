@@ -16,6 +16,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y file patchelf desktop-file-utils libfuse2 python3
+          python3 --version
+
+      - name: Validate dataset scripts
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/prepare_real_corpus.py scripts/prepare_online_corpus.py scripts/prepare_curriculum.py
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -31,11 +37,6 @@ jobs:
           chmod +x appimagetool.AppImage
           sudo mv appimagetool.AppImage /usr/local/bin/appimagetool
           appimagetool --version || true
-
-      - name: Validate dataset preparation scripts
-        run: |
-          set -euo pipefail
-          python3 -m py_compile scripts/prepare_curriculum.py scripts/prepare_online_corpus.py scripts/prepare_real_corpus.py
 
       - name: Build GemmaAgent UI and CPU trainer
         run: |
@@ -60,12 +61,13 @@ jobs:
           cp target/release/amd-train AppDir/usr/bin/amd-train
           chmod +x AppDir/usr/bin/gemma-ui AppDir/usr/bin/cpu-train AppDir/usr/bin/amd-train
 
+          cp scripts/prepare_real_corpus.py AppDir/usr/share/gemma-agent/scripts/
+          cp scripts/prepare_online_corpus.py AppDir/usr/share/gemma-agent/scripts/
+          cp scripts/prepare_curriculum.py AppDir/usr/share/gemma-agent/scripts/
+          chmod +x AppDir/usr/share/gemma-agent/scripts/*.py
+
           cp AppRun AppDir/AppRun
           chmod +x AppDir/AppRun
-
-          cp scripts/prepare_curriculum.py AppDir/usr/share/gemma-agent/scripts/prepare_curriculum.py
-          cp scripts/prepare_online_corpus.py AppDir/usr/share/gemma-agent/scripts/prepare_online_corpus.py
-          cp scripts/prepare_real_corpus.py AppDir/usr/share/gemma-agent/scripts/prepare_real_corpus.py
 
           cp packaging/gemma-agent.desktop AppDir/usr/share/applications/gemma-agent.desktop
           cp packaging/gemma-agent.svg AppDir/usr/share/icons/hicolor/scalable/apps/gemma-agent.svg
@@ -85,10 +87,10 @@ jobs:
             test -x "AppDir/usr/bin/$binary"
             file "AppDir/usr/bin/$binary"
           done
-          for script in prepare_curriculum.py prepare_online_corpus.py prepare_real_corpus.py; do
+          for script in prepare_real_corpus.py prepare_online_corpus.py prepare_curriculum.py; do
             test -f "AppDir/usr/share/gemma-agent/scripts/$script"
+            test -x "AppDir/usr/share/gemma-agent/scripts/$script"
           done
-          python3 -m py_compile AppDir/usr/share/gemma-agent/scripts/*.py
 
       - name: Package AppImage
         shell: bash
