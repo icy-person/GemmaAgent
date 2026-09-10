@@ -86,15 +86,46 @@ impl Value {
     pub fn log(&self) -> Self { let (rows, cols) = self.shape(); let out = { let n = self.0.borrow(); n.d.iter().map(|x| x.max(1e-20).ln()).collect() }; Self::mk(rows, cols, out, Op::Log(self.clone())) }
     pub fn neg(&self) -> Self { let (rows, cols) = self.shape(); let out = { let n = self.0.borrow(); n.d.iter().map(|x| -x).collect() }; Self::mk(rows, cols, out, Op::Neg(self.clone())) }
     pub fn silu(&self) -> Self { let (rows, cols) = self.shape(); let out = { let n = self.0.borrow(); n.d.iter().map(|x| x / (1.0 + (-x).exp())).collect() }; Self::mk(rows, cols, out, Op::Silu(self.clone())) }
+    /// Row-wise RMSNorm: every row is normalized independently by its own root-mean-square, so
+    /// this works the same whether `self` is a single `(1, cols)` state or a whole `(rows,
+    /// cols)` sequence batched into one matrix.
     pub fn rms_norm(&self, eps: f32) -> Self {
-        let (rows, cols) = self.shape(); assert_eq!(rows, 1, "rms_norm expects a row vector"); assert!(eps.is_finite() && eps > 0.0);
-        let out = { let n = self.0.borrow(); let mean_sq = n.d.iter().map(|v| v * v).sum::<f32>() / cols as f32; let inv = (mean_sq + eps).sqrt().recip(); n.d.iter().map(|v| v * inv).collect() };
+        let (rows, cols) = self.shape(); assert!(eps.is_finite() && eps > 0.0);
+        let out = {
+            let n = self.0.borrow();
+            let mut out = vec![0.0f32; rows * cols];
+            for r in 0..rows {
+                let row = &n.d[r * cols..(r + 1) * cols];
+                let mean_sq = row.iter().map(|v| v * v).sum::<f32>() / cols as f32;
+                let inv = (mean_sq + eps).sqrt().recip();
+                let out_row = &mut out[r * cols..(r + 1) * cols];
+                for (o, v) in out_row.iter_mut().zip(row) { *o = v * inv; }
+            }
+            out
+        };
         Self::mk(rows, cols, out, Op::RmsNorm(self.clone(), eps))
     }
+    /// Row-wise softmax: each row is normalized independently over its columns. A `(1, cols)`
+    /// vector is the special case of a single row; a `(rows, cols)` matrix (e.g. a whole
+    /// batched attention score matrix) gets one independent softmax per row in the same op,
+    /// instead of needing a separate node per row.
     pub fn softmax(&self) -> Self {
-        let (rows, cols) = self.shape(); assert_eq!(rows, 1, "softmax expects a row vector");
-        let out = { let n = self.0.borrow(); let max = n.d.iter().copied().fold(f32::NEG_INFINITY, f32::max); let exp: Vec<f32> = n.d.iter().map(|v| (*v - max).exp()).collect(); let sum = exp.iter().sum::<f32>().max(1e-20); exp.into_iter().map(|v| v / sum).collect() };
-        Self::mk(1, cols, out, Op::Softmax(self.clone()))
+        let (rows, cols) = self.shape();
+        let out = {
+            let n = self.0.borrow();
+            let mut out = vec![0.0f32; rows * cols];
+            for r in 0..rows {
+                let row = &n.d[r * cols..(r + 1) * cols];
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let out_row = &mut out[r * cols..(r + 1) * cols];
+                let mut sum = 0.0f32;
+                for (o, v) in out_row.iter_mut().zip(row) { *o = (*v - max).exp(); sum += *o; }
+                let sum = sum.max(1e-20);
+                for o in out_row.iter_mut() { *o /= sum; }
+            }
+            out
+        };
+        Self::mk(rows, cols, out, Op::Softmax(self.clone()))
     }
     pub fn concat_rows(xs: &[Self]) -> Self {
         assert!(!xs.is_empty());
@@ -140,17 +171,65 @@ impl Value {
 
 fn topo(value:&Value,seen:&mut HashSet<usize>,order:&mut Vec<Value>){ if !seen.insert(value.id()){return;} match value.0.borrow().op.clone(){ Op::Leaf=>{}, Op::Add(a,b)|Op::Mul(a,b)|Op::MatMul(a,b)=>{topo(&a,seen,order);topo(&b,seen,order)}, Op::Transpose(a)|Op::Log(a)|Op::Neg(a)|Op::Softmax(a)|Op::Silu(a)|Op::RmsNorm(a,_)|Op::Slice(a,_,_)|Op::Gather(a,_)|Op::RowGather(a,_)=>topo(&a,seen,order), Op::ConcatRows(xs)|Op::ConcatCols(xs)=>{for x in xs{topo(&x,seen,order);}} } order.push(value.clone()); }
 fn accumulate(value:&Value,grad:&[f32]){let mut node=value.0.borrow_mut(); assert_eq!(node.g.len(),grad.len()); for(dst,src) in node.g.iter_mut().zip(grad){*dst+=*src;}}
+
+/// Every branch below reads parent tensors via a direct `RefCell` borrow instead of `.data()`,
+/// so backward only allocates the gradient buffers it actually produces (`ga`/`gb`/...) rather
+/// than an extra full clone of each parent's data first. This matters more once ops run on
+/// whole-sequence matrices (batched attention/projections) instead of one row at a time, since
+/// each avoided clone is now a much bigger allocation.
 fn back(value:&Value){ let grad=value.grad(); match value.0.borrow().op.clone(){
     Op::Leaf=>{}
     Op::Add(a,b)=>{accumulate(&a,&grad);accumulate(&b,&grad)}
-    Op::Mul(a,b)=>{let x=a.data();let y=b.data();accumulate(&a,&grad.iter().zip(&y).map(|(g,y)|g*y).collect::<Vec<_>>());accumulate(&b,&grad.iter().zip(&x).map(|(g,x)|g*x).collect::<Vec<_>>());}
-    Op::MatMul(a,b)=>{let(ar,ac)=a.shape();let(_,bc)=b.shape();let x=a.data();let y=b.data();let mut ga=vec![0.0;ar*ac];let mut gb=vec![0.0;ac*bc];for i in 0..ar{for k in 0..ac{for j in 0..bc{let g=grad[i*bc+j];ga[i*ac+k]+=g*y[k*bc+j];gb[k*bc+j]+=x[i*ac+k]*g;}}}accumulate(&a,&ga);accumulate(&b,&gb);}
+    Op::Mul(a,b)=>{
+        let(ga,gb)={let na=a.0.borrow();let nb=b.0.borrow();(
+            grad.iter().zip(nb.d.iter()).map(|(g,y)|g*y).collect::<Vec<_>>(),
+            grad.iter().zip(na.d.iter()).map(|(g,x)|g*x).collect::<Vec<_>>(),
+        )};
+        accumulate(&a,&ga);accumulate(&b,&gb);
+    }
+    Op::MatMul(a,b)=>{
+        let(ar,ac)=a.shape();let(_,bc)=b.shape();
+        let(ga,gb)={
+            let na=a.0.borrow();let nb=b.0.borrow();let x=&na.d;let y=&nb.d;
+            let mut ga=vec![0.0;ar*ac];let mut gb=vec![0.0;ac*bc];
+            for i in 0..ar{for k in 0..ac{let a_ik=x[i*ac+k];for j in 0..bc{let g=grad[i*bc+j];ga[i*ac+k]+=g*y[k*bc+j];gb[k*bc+j]+=a_ik*g;}}}
+            (ga,gb)
+        };
+        accumulate(&a,&ga);accumulate(&b,&gb);
+    }
     Op::Transpose(a)=>{let(out_rows,out_cols)=value.shape();let mut ga=vec![0.0;grad.len()];for i in 0..out_rows{for j in 0..out_cols{ga[j*out_rows+i]=grad[i*out_cols+j];}}accumulate(&a,&ga);}
-    Op::Log(a)=>{let data=a.data();accumulate(&a,&grad.iter().zip(data).map(|(g,x)|if x>=1e-20{g/x}else{0.0}).collect::<Vec<_>>());}
+    Op::Log(a)=>{let ga={let na=a.0.borrow();grad.iter().zip(na.d.iter()).map(|(g,x)|if *x>=1e-20{g/x}else{0.0}).collect::<Vec<_>>()};accumulate(&a,&ga);}
     Op::Neg(a)=>accumulate(&a,&grad.iter().map(|g|-g).collect::<Vec<_>>()),
-    Op::Silu(a)=>{let data=a.data();let ga=data.iter().zip(&grad).map(|(x,g)|{let s=1.0/(1.0+(-x).exp());g*s*(1.0+x*(1.0-s))}).collect::<Vec<_>>();accumulate(&a,&ga);}
-    Op::RmsNorm(a,eps)=>{let x=a.data();let n=x.len() as f32;let mean_sq=x.iter().map(|v|v*v).sum::<f32>()/n;let r=(mean_sq+eps).sqrt();let inv=1.0/r;let dot=grad.iter().zip(&x).map(|(g,x)|g*x).sum::<f32>();let coeff=dot/(n*r*r*r);let ga=x.iter().zip(&grad).map(|(x,g)|g*inv-x*coeff).collect::<Vec<_>>();accumulate(&a,&ga);}
-    Op::Softmax(a)=>{let y=value.data();let dot=grad.iter().zip(&y).map(|(g,y)|g*y).sum::<f32>();let ga=y.iter().zip(&grad).map(|(y,g)|y*(g-dot)).collect::<Vec<_>>();accumulate(&a,&ga);}
+    Op::Silu(a)=>{let ga={let na=a.0.borrow();na.d.iter().zip(&grad).map(|(x,g)|{let s=1.0/(1.0+(-x).exp());g*s*(1.0+x*(1.0-s))}).collect::<Vec<_>>()};accumulate(&a,&ga);}
+    Op::RmsNorm(a,eps)=>{
+        let(rows,cols)=a.shape();let n=cols as f32;
+        let ga={
+            let na=a.0.borrow();let mut ga=vec![0.0f32;rows*cols];
+            for r in 0..rows{
+                let x_row=&na.d[r*cols..(r+1)*cols];let g_row=&grad[r*cols..(r+1)*cols];
+                let mean_sq=x_row.iter().map(|v|v*v).sum::<f32>()/n;let rr=(mean_sq+eps).sqrt();let inv=1.0/rr;
+                let dot=g_row.iter().zip(x_row).map(|(g,x)|g*x).sum::<f32>();let coeff=dot/(n*rr*rr*rr);
+                let ga_row=&mut ga[r*cols..(r+1)*cols];
+                for j in 0..cols{ga_row[j]=g_row[j]*inv-x_row[j]*coeff;}
+            }
+            ga
+        };
+        accumulate(&a,&ga);
+    }
+    Op::Softmax(a)=>{
+        let(rows,cols)=value.shape();
+        let ga={
+            let ny=value.0.borrow();let mut ga=vec![0.0f32;rows*cols];
+            for r in 0..rows{
+                let y_row=&ny.d[r*cols..(r+1)*cols];let g_row=&grad[r*cols..(r+1)*cols];
+                let dot=g_row.iter().zip(y_row).map(|(g,y)|g*y).sum::<f32>();
+                let ga_row=&mut ga[r*cols..(r+1)*cols];
+                for j in 0..cols{ga_row[j]=y_row[j]*(g_row[j]-dot);}
+            }
+            ga
+        };
+        accumulate(&a,&ga);
+    }
     Op::ConcatRows(xs)=>{let cols=value.shape().1;for(row,x)in xs.iter().enumerate(){accumulate(x,&grad[row*cols..(row+1)*cols]);}}
     Op::ConcatCols(xs)=>{let rows=value.shape().0;let cols=value.shape().1;let mut offset=0;for x in xs{let width=x.shape().1;let mut gx=vec![0.0;rows*width];for row in 0..rows{gx[row*width..(row+1)*width].copy_from_slice(&grad[row*cols+offset..row*cols+offset+width]);}accumulate(&x,&gx);offset+=width;}}
     Op::Slice(a,start,len)=>{let(rows,cols)=a.shape();let mut ga=vec![0.0;rows*cols];for row in 0..rows{ga[row*cols+start..row*cols+start+len].copy_from_slice(&grad[row*len..(row+1)*len]);}accumulate(&a,&ga);}
@@ -158,16 +237,20 @@ fn back(value:&Value){ let grad=value.grad(); match value.0.borrow().op.clone(){
     Op::RowGather(a,row)=>{let cols=a.shape().1;let mut ga=vec![0.0;a.data().len()];ga[row*cols..(row+1)*cols].copy_from_slice(&grad);accumulate(&a,&ga);}
 }}
 
-/// Multiply-add count above which the dominant `1 x ac` * `ac x bc` shape in this model (every
-/// Q/K/V/O/up/down/logits projection is a single-token row vector times a weight matrix) is
-/// split across threads. Below this, or on a single-core host, the thread-spawn overhead loses
+/// Multiply-add count above which the `1 x ac` * `ac x bc` matmul shape (single-token row
+/// vector times a weight matrix — still used for per-target logits/loss) is split across
+/// threads by output column. Below this, or on a single-core host, thread-spawn overhead loses
 /// to the plain sequential loop.
 const PARALLEL_MATMUL_THRESHOLD: usize = 4096;
+/// Multiply-add volume (`ar*ac*bc`) above which a multi-row matmul (`ar>1` — the shape used by
+/// the batched per-layer projections and attention matrices, where every row is an independent
+/// token/query) is split across threads by output row instead.
+const PARALLEL_MATMUL_ROW_THRESHOLD: usize = 200_000;
 
 fn matmul_raw(x: &[f32], y: &[f32], ar: usize, ac: usize, bc: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; ar * bc];
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     if ar == 1 {
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         if bc > 1 && threads > 1 && ac * bc >= PARALLEL_MATMUL_THRESHOLD {
             let chunk = bc.div_ceil(threads.min(bc));
             std::thread::scope(|scope| {
@@ -181,12 +264,16 @@ fn matmul_raw(x: &[f32], y: &[f32], ar: usize, ac: usize, bc: usize) -> Vec<f32>
         }
         return out;
     }
-    for i in 0..ar {
-        for k in 0..ac {
-            let a = x[i * ac + k];
-            if a == 0.0 { continue; }
-            for j in 0..bc { out[i * bc + j] += a * y[k * bc + j]; }
-        }
+    if threads > 1 && ar * ac * bc >= PARALLEL_MATMUL_ROW_THRESHOLD {
+        let rows_per_chunk = ar.div_ceil(threads.min(ar));
+        std::thread::scope(|scope| {
+            for (idx, out_chunk) in out.chunks_mut(rows_per_chunk * bc).enumerate() {
+                let row_start = idx * rows_per_chunk;
+                scope.spawn(move || mat_matmul_rows(x, y, ac, bc, row_start, out_chunk));
+            }
+        });
+    } else {
+        mat_matmul_rows(x, y, ac, bc, 0, &mut out);
     }
     out
 }
@@ -202,15 +289,57 @@ fn vec_matmul_cols(x: &[f32], y: &[f32], ac: usize, bc: usize, col_start: usize,
     }
 }
 
+/// Computes rows `[row_start, row_start + out.len()/bc)` of `x (ar x ac) * y (ac x bc)`.
+fn mat_matmul_rows(x: &[f32], y: &[f32], ac: usize, bc: usize, row_start: usize, out: &mut [f32]) {
+    let row_count = out.len() / bc;
+    for local_i in 0..row_count {
+        let i = row_start + local_i;
+        let out_row = &mut out[local_i * bc..(local_i + 1) * bc];
+        for k in 0..ac {
+            let a = x[i * ac + k];
+            if a == 0.0 { continue; }
+            let y_row = &y[k * bc..(k + 1) * bc];
+            for (o, yv) in out_row.iter_mut().zip(y_row) { *o += a * yv; }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests{
  use super::*;
  #[test]fn matmul_backward(){let a=Value::leaf(1,2,vec![2.,3.]);let b=Value::leaf(2,1,vec![5.,7.]);let y=a.matmul(&b);y.backward();assert_eq!(a.grad(),vec![5.,7.]);assert_eq!(b.grad(),vec![2.,3.]);}
+ #[test]fn matmul_multi_row_backward_matches_finite_difference(){
+    let a=Value::leaf(2,2,vec![1.,2.,3.,4.]);let b=Value::leaf(2,2,vec![5.,6.,7.,8.]);
+    let y=a.matmul(&b);let loss=y.mul(&Value::leaf(2,2,vec![1.,1.,1.,1.]));
+    loss.backward();let analytic=a.grad();let base=a.data();let eps=1e-3f32;
+    for i in 0..4{
+        let mut plus=base.clone();plus[i]+=eps;let mut minus=base.clone();minus[i]-=eps;
+        let lp=Value::leaf(2,2,plus).matmul(&b).data().iter().sum::<f32>();
+        let lm=Value::leaf(2,2,minus).matmul(&b).data().iter().sum::<f32>();
+        let numeric=(lp-lm)/(2.*eps);
+        assert!((analytic[i]-numeric).abs()<2e-3,"i={i} analytic={} numeric={}",analytic[i],numeric);
+    }
+ }
  #[test]fn transpose_backward(){let a=Value::leaf(2,3,vec![1.,2.,3.,4.,5.,6.]);let y=a.transpose();y.backward();assert_eq!(a.grad(),vec![1.;6]);}
  #[test]fn concat_cols_matrix_backward(){let a=Value::leaf(2,1,vec![1.,2.]);let b=Value::leaf(2,2,vec![3.,4.,5.,6.]);let y=Value::concat_cols(&[a.clone(),b.clone()]);y.backward();assert_eq!(a.grad(),vec![1.,1.]);assert_eq!(b.grad(),vec![1.,1.,1.,1.]);}
  #[test]fn slice_matrix_backward(){let a=Value::leaf(2,4,vec![1.,2.,3.,4.,5.,6.,7.,8.]);let y=a.slice_cols(1,2);y.backward();assert_eq!(a.grad(),vec![0.,1.,1.,0.,0.,1.,1.,0.]);}
  #[test]fn row_gather_backward(){let a=Value::leaf(3,2,vec![1.,2.,3.,4.,5.,6.]);let y=a.row(1);y.backward();assert_eq!(a.grad(),vec![0.,0.,1.,1.,0.,0.]);}
  #[test]fn softmax_sums_to_one(){let y=Value::leaf(1,3,vec![1.,2.,3.]).softmax();let sum:f32=y.data().iter().sum();assert!((sum-1.).abs()<1e-6);}
+ #[test]fn softmax_is_row_wise_for_matrices(){
+    let y=Value::leaf(2,3,vec![1.,2.,3., 10.,10.,10.]).softmax();
+    let d=y.data();
+    assert!((d[0..3].iter().sum::<f32>()-1.).abs()<1e-6);
+    assert!((d[3..6].iter().sum::<f32>()-1.).abs()<1e-6);
+    // uniform row (equal logits) softmaxes to a uniform distribution
+    for v in &d[3..6]{assert!((v-1./3.).abs()<1e-6);}
+ }
+ #[test]fn rms_norm_is_row_wise_for_matrices(){
+    let x=Value::leaf(2,3,vec![1.,2.,3., 2.,4.,6.]);
+    let y=x.rms_norm(1e-5);let d=y.data();
+    // both rows point in the same direction (row 2 = 2 * row 1), so RMSNorm must normalize
+    // them to (nearly) the same unit-scale row independent of the other row's magnitude.
+    for i in 0..3{assert!((d[i]-d[3+i]).abs()<1e-3,"row 0 and row 1 should normalize to the same values");}
+ }
  #[test]fn silu_backward(){let x=Value::leaf(1,1,vec![0.7]);let y=x.silu();y.backward();let s=1./(1.+(-0.7_f32).exp());let expected=s*(1.+0.7*(1.-s));assert!((x.grad()[0]-expected).abs()<1e-6);}
  #[test]fn rms_norm_backward_finite_difference(){let x=Value::leaf(1,3,vec![0.4,-0.7,1.2]);let y=x.rms_norm(1e-5);let loss=y.mul(&Value::leaf(1,3,vec![0.3,-0.2,0.5]));loss.backward();let analytic=x.grad();let base=x.data();let eps=1e-3_f32;for i in 0..3{let mut plus=base.clone();plus[i]+=eps;let mut minus=base.clone();minus[i]-=eps;let lp=Value::leaf(1,3,plus).rms_norm(1e-5).mul(&Value::leaf(1,3,vec![0.3,-0.2,0.5])).data().iter().sum::<f32>();let lm=Value::leaf(1,3,minus).rms_norm(1e-5).mul(&Value::leaf(1,3,vec![0.3,-0.2,0.5])).data().iter().sum::<f32>();let numeric=(lp-lm)/(2.*eps);assert!((analytic[i]-numeric).abs()<2e-3,"i={i} analytic={} numeric={}",analytic[i],numeric);}}
  #[test]fn log_clamp_has_zero_gradient_below_floor(){let x=Value::leaf(1,1,vec![1e-25]);let y=x.log();y.backward();assert_eq!(x.grad(),vec![0.]);}
@@ -229,6 +358,15 @@ mod tests{
     for k in 0..ac { for j in 0..bc { expected[j]+=xd[k]*yd[k*bc+j]; } }
     for(a,b) in result.data().iter().zip(expected.iter()) { assert!((a-b).abs()<1e-3,"parallel matmul diverged from manual dot product: {a} vs {b}"); }
  }
+ #[test]fn matmul_multi_row_parallel_path_matches_manual_dot_product(){
+    let ar=64usize; let ac=80usize; let bc=80usize; // ar*ac*bc is well above PARALLEL_MATMUL_ROW_THRESHOLD
+    let mut seed=11; let x=Value::parameter(ar,ac,&mut seed); let y=Value::parameter(ac,bc,&mut seed);
+    let result=x.matmul(&y);
+    let xd=x.data(); let yd=y.data();
+    let mut expected=vec![0.0f32;ar*bc];
+    for i in 0..ar { for k in 0..ac { for j in 0..bc { expected[i*bc+j]+=xd[i*ac+k]*yd[k*bc+j]; } } }
+    for(a,b) in result.data().iter().zip(expected.iter()) { assert!((a-b).abs()<1e-3,"parallel row-split matmul diverged from manual dot product: {a} vs {b}"); }
+ }
  #[test]fn add_and_mul_on_self_do_not_panic_on_double_borrow(){
     // add(&self, &self) / mul(&self, &self) each take two immutable borrows of the *same*
     // RefCell at once. RefCell permits any number of simultaneous immutable borrows, so this
@@ -236,5 +374,14 @@ mod tests{
     let a=Value::leaf(1,3,vec![1.,2.,3.]);
     assert_eq!(a.add(&a).data(),vec![2.,4.,6.]);
     assert_eq!(a.mul(&a).data(),vec![1.,4.,9.]);
+ }
+ #[test]fn mul_self_backward_does_not_panic_and_sums_both_branches(){
+    // y = a * a (elementwise); dy/da = 2a. Both operands of Op::Mul are the same node, so the
+    // borrow-based backward above must borrow it twice immutably (fine) and accumulate into it
+    // twice sequentially (also fine) rather than panicking on a double mutable borrow.
+    let a=Value::leaf(1,3,vec![2.,3.,4.]);
+    let y=a.mul(&a);
+    y.backward();
+    assert_eq!(a.grad(),vec![4.,6.,8.]);
  }
 }
